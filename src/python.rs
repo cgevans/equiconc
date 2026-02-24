@@ -24,7 +24,7 @@ fn map_err(e: EquilibriumError) -> PyErr {
 ///
 /// Build a system by chaining `.monomer()` and `.complex()` calls, then
 /// call `.equilibrium()` to solve.
-#[pyclass(name = "System")]
+#[pyclass(name = "System", module = "equiconc")]
 struct PySystem {
     temperature: f64,
     monomers: Vec<(String, f64)>,
