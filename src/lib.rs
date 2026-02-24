@@ -228,8 +228,8 @@ impl System {
 // ---------------------------------------------------------------------------
 
 pub struct Equilibrium {
-    monomer_names: Vec<String>,
-    complex_names: Vec<String>,
+    pub(crate) monomer_names: Vec<String>,
+    pub(crate) complex_names: Vec<String>,
     pub free_monomer_concentrations: Vec<f64>,
     pub complex_concentrations: Vec<f64>,
 }
@@ -546,3 +546,10 @@ mod tests {
         assert!((b + ab - 100.0 * NM).abs() < 1e-8 * 100.0 * NM);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Python bindings (behind "python" feature)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "python")]
+mod python;
