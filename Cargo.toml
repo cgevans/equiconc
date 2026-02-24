@@ -8,7 +8,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 nalgebra = "0.33"
-pyo3 = { version = "0.25", optional = true, features = ["extension-module"] }
+pyo3 = { version = "0.28", optional = true, features = ["extension-module"] }
 
 [features]
 default = []
