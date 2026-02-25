@@ -398,19 +398,27 @@ fn solve_dual(
     c0: &DVector<f64>,
 ) -> Result<DVector<f64>, EquilibriumError> {
     const MAX_ITER: usize = 1000;
-    const TOL: f64 = 1e-12;
+    const ATOL: f64 = 1e-14;
+    const RTOL: f64 = 1e-7;
     const ETA: f64 = 1e-4;
     const DELTA_MAX: f64 = 1e10;
 
     // Initial guess: λ_i = ln(c⁰_i)
     let mut lambda = DVector::from_iterator(c0.len(), c0.iter().map(|&c| c.ln()));
     let mut delta = 1.0;
+    let mut stagnation = 0u32;
 
     for _ in 0..MAX_ITER {
         let eval = evaluate(a, log_q, c0, &lambda);
-        let grad_norm = eval.grad.norm();
 
-        if grad_norm < TOL {
+        // Per-component convergence: each gradient entry (= mass balance
+        // error for that monomer) must be small relative to its c⁰.
+        if eval
+            .grad
+            .iter()
+            .zip(c0.iter())
+            .all(|(&g, &c)| g.abs() < ATOL + RTOL * c)
+        {
             return Ok(lambda);
         }
 
@@ -424,8 +432,31 @@ fn solve_dual(
         let actual_reduction = eval.f - eval_new.f;
         let predicted_reduction = -(eval.grad.dot(&p) + 0.5 * p.dot(&(&eval.hessian * &p)));
 
-        // Defensive: near-zero predicted reduction only occurs with
-        // near-machine-epsilon steps, effectively unreachable.
+        // Track stagnation: objective can't decrease further in f64.
+        if actual_reduction == 0.0 {
+            stagnation += 1;
+        } else {
+            stagnation = 0;
+        }
+
+        // When the trust region has collapsed and steps produce no
+        // measurable reduction, try a full Newton step. The objective
+        // is at f64 precision, but lambda can still improve, yielding
+        // better gradient (mass-balance) accuracy.
+        if stagnation >= 3 {
+            let p_full = dogleg_step(&eval.grad, &eval.hessian, DELTA_MAX);
+            let lambda_full = &lambda + &p_full;
+            let eval_full = evaluate(a, log_q, c0, &lambda_full);
+            if eval_full.f <= eval.f {
+                lambda = lambda_full;
+                delta = p_full.norm();
+                stagnation = 0;
+                continue;
+            }
+            // Recovery failed — already at best achievable point.
+            return Ok(lambda);
+        }
+
         let rho = if predicted_reduction.abs() < 1e-30 {
             if actual_reduction >= 0.0 {
                 1.0

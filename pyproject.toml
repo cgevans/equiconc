@@ -12,6 +12,7 @@ features = ["python"]
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.0",
     "ipykernel>=6.31.0",
     "ipywidgets>=8.1.8",
     "matplotlib>=3.9",

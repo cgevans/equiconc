@@ -1,0 +1,18 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3285ae7320402beb3c6f34c7efa49582ff156c8e646f471f8a9f68e0f76b134f # shrinks to (c0, dg, temp) = (1.21988552632328e-5, -10.45502365318365, 358.28888903105155)
+cc 27f756689a3017b408f51505b9a952c81b302b45181347c23de602d1e4716eee # shrinks to spec = SystemSpec { temperature: 293.15, monomers: [("A", 0.001)], complexes: [("c0", [("A", 2)], -1.4473254019172739)] }
+cc 055b39903fd74f8ea2f49ba2640cf3a53e4fc3fc98a6184d500ba7abacf738de # shrinks to spec = SystemSpec { temperature: 293.15, monomers: [("A", 0.001)], complexes: [("c0", [("A", 1)], 0.0)] }
+cc 0db6cea4b2f9763b7ed867899fe0ad767207b41afbb2d2d00b273f7a0b22b9d3 # shrinks to spec = SystemSpec { temperature: 293.15, monomers: [("A", 0.001), ("B", 0.001)], complexes: [("c0", [("A", 1), ("B", 2)], -6.73997642484338)] }
+cc 2e30ca6e5595bb8c7773bff427971393a7f50cfd9d55e73921577cbf294bf078 # shrinks to spec = SystemSpec { temperature: 293.15, monomers: [("A", 0.001), ("B", 0.001), ("C", 0.001), ("D", 0.001)], complexes: [("c0", [("C", 1), ("D", 3)], 0.0)] }
+cc 71573937fe06852055245705c23e3a94690abc9c6b8583f338122a0cbf820455 # shrinks to spec = SystemSpec { temperature: 293.15, monomers: [("A", 0.001), ("B", 0.001), ("C", 0.001)], complexes: [("c0", [("A", 1), ("C", 2)], -10.969870717131064)] }
+cc 1c0fe5ce8195f979c16bca2473cb1282973bc739f9ceb10da5bdd264f4412476 # shrinks to spec = SystemSpec { temperature: 293.15, monomers: [("A", 0.001), ("B", 0.001), ("C", 0.001), ("D", 0.001)], complexes: [("c0", [("A", 3), ("B", 1)], -7.651097778789482)] }
+cc 8350fea041dbef672c201b2820ed37d4cc395a9d5ec82ed29f1c76294ed2eadf # shrinks to spec = SystemSpec { temperature: 293.15, monomers: [("A", 0.001), ("B", 0.001), ("C", 0.001), ("D", 0.001)], complexes: [("c0", [("B", 1), ("C", 1), ("D", 1)], 0.0)] }
+cc f206d57b0ed0fb848e8e9769bc8a61f6e447b47f6a290f77e25ddcd80b14ed63 # shrinks to spec = SystemSpec { temperature: 293.15, monomers: [("A", 0.001), ("B", 0.001)], complexes: [("c0", [("A", 2), ("B", 1)], -7.821779458690851)] }
+cc e03ec0d4351961ea8b118aa05829894415f90efb91dc6cb5a6a3b685e3eb229d # shrinks to spec = SystemSpec { temperature: 293.15, monomers: [("A", 0.001), ("B", 0.001), ("C", 1.6647689404770402e-6)], complexes: [("c0", [("A", 3), ("C", 2)], -13.55893115453086)] }
+cc dbd8c3c3e51d4a4e2119c1a4297ca660175cbaa3223c5cb509fb401498594ebf # shrinks to spec = SystemSpec { temperature: 293.15, monomers: [("A", 0.001), ("B", 0.001), ("C", 1.7615316892126754e-6), ("D", 0.00019030182721402762)], complexes: [("c0", [("D", 3)], 0.0), ("c1", [("A", 2), ("B", 2), ("D", 2)], 0.0), ("c2", [("A", 1), ("C", 3)], -13.29416955378253)] }
+cc 3c47f1995ebc293e31a1fbfb14ddb46659df069855b3687fb7a8b1cb8a4e0c97 # shrinks to spec = SystemSpec { temperature: 318.8512187743357, monomers: [("A", 0.001), ("B", 1.4972375666592988e-6), ("C", 0.001), ("D", 0.001)], complexes: [("c0", [("B", 2), ("D", 2)], -14.08387133161224)] }
