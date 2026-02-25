@@ -120,3 +120,49 @@ def test_repr():
     sys2 = sys.monomer("A", 50e-9)
     eq = sys2.equilibrium()
     assert "Equilibrium" in repr(eq)
+
+
+def test_negative_concentration_error():
+    with pytest.raises(ValueError, match="invalid concentration"):
+        equiconc.System().monomer("A", -1e-9)
+
+
+def test_zero_concentration_error():
+    with pytest.raises(ValueError, match="invalid concentration"):
+        equiconc.System().monomer("A", 0.0)
+
+
+def test_zero_temperature_error():
+    with pytest.raises(ValueError, match="invalid temperature"):
+        equiconc.System(temperature=0.0)
+
+
+def test_negative_temperature_error():
+    with pytest.raises(ValueError, match="invalid temperature"):
+        equiconc.System(temperature=-100.0)
+
+
+def test_duplicate_monomer_error():
+    with pytest.raises(ValueError, match="duplicate monomer"):
+        equiconc.System().monomer("A", 1e-9).monomer("A", 2e-9)
+
+
+def test_duplicate_complex_error():
+    with pytest.raises(ValueError, match="duplicate complex"):
+        (
+            equiconc.System()
+            .monomer("A", 1e-9)
+            .monomer("B", 1e-9)
+            .complex("AB", [("A", 1), ("B", 1)], delta_g=-10.0)
+            .complex("AB", [("A", 1), ("B", 1)], delta_g=-12.0)
+        )
+
+
+def test_zero_count_error():
+    with pytest.raises(ValueError, match="zero stoichiometric count"):
+        (
+            equiconc.System()
+            .monomer("A", 1e-9)
+            .monomer("B", 1e-9)
+            .complex("AB", [("A", 0), ("B", 1)], delta_g=-10.0)
+        )

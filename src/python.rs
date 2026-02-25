@@ -35,20 +35,38 @@ struct PySystem {
 impl PySystem {
     #[new]
     #[pyo3(signature = (temperature = 310.15))]
-    fn new(temperature: f64) -> Self {
-        PySystem {
+    fn new(temperature: f64) -> PyResult<Self> {
+        if !(temperature > 0.0 && temperature.is_finite()) {
+            return Err(PyValueError::new_err(format!(
+                "invalid temperature: {temperature} (must be finite and positive)"
+            )));
+        }
+        Ok(PySystem {
             temperature,
             monomers: Vec::new(),
             complexes: Vec::new(),
-        }
+        })
     }
 
     /// Add a monomer species with a given total concentration (molar).
-    fn monomer(slf: Py<Self>, py: Python<'_>, name: &str, total_concentration: f64) -> Py<Self> {
+    fn monomer(slf: Py<Self>, py: Python<'_>, name: &str, total_concentration: f64) -> PyResult<Py<Self>> {
+        if !(total_concentration > 0.0 && total_concentration.is_finite()) {
+            return Err(PyValueError::new_err(format!(
+                "invalid concentration: {total_concentration} (must be finite and positive)"
+            )));
+        }
+        {
+            let inner = slf.borrow(py);
+            if inner.monomers.iter().any(|(n, _)| n == name) {
+                return Err(PyValueError::new_err(format!(
+                    "duplicate monomer: {name}"
+                )));
+            }
+        }
         slf.borrow_mut(py)
             .monomers
             .push((name.to_string(), total_concentration));
-        slf
+        Ok(slf)
     }
 
     /// Add a complex with composition `[(monomer_name, count), ...]` and ΔG° (kcal/mol).
@@ -64,9 +82,22 @@ impl PySystem {
         }
         {
             let mut inner = slf.borrow_mut(py);
-            // Eagerly validate monomer names
+            // Check for duplicate complex name (also reject collision with monomer names)
+            if inner.complexes.iter().any(|(n, _, _)| n == name)
+                || inner.monomers.iter().any(|(n, _)| n == name)
+            {
+                return Err(PyValueError::new_err(format!(
+                    "duplicate complex: {name}"
+                )));
+            }
+            // Eagerly validate monomer names and counts
             let known: Vec<&str> = inner.monomers.iter().map(|(n, _)| n.as_str()).collect();
-            for (monomer_name, _) in &composition {
+            for (monomer_name, count) in &composition {
+                if *count == 0 {
+                    return Err(PyValueError::new_err(format!(
+                        "zero stoichiometric count for monomer: {monomer_name}"
+                    )));
+                }
                 if !known.contains(&monomer_name.as_str()) {
                     return Err(PyValueError::new_err(format!(
                         "unknown monomer: {monomer_name}"
@@ -81,9 +112,9 @@ impl PySystem {
     /// Solve for equilibrium concentrations.
     fn equilibrium(&self) -> PyResult<PyEquilibrium> {
         // Build the Rust System from stored inputs
-        let mut sys = crate::System::new().temperature(self.temperature);
+        let mut sys = crate::System::new().temperature(self.temperature).map_err(map_err)?;
         for (name, conc) in &self.monomers {
-            sys = sys.monomer(name, *conc);
+            sys = sys.monomer(name, *conc).map_err(map_err)?;
         }
         for (name, comp, dg) in &self.complexes {
             let comp_refs: Vec<(&str, usize)> =
