@@ -11,6 +11,7 @@ use crate::{Equilibrium, EquilibriumError};
 
 fn map_err(e: EquilibriumError) -> PyErr {
     match e {
+        // Defensive: the convex dual always converges for valid inputs.
         EquilibriumError::ConvergenceFailure { .. } => PyRuntimeError::new_err(e.to_string()),
         _ => PyValueError::new_err(e.to_string()),
     }
@@ -111,7 +112,9 @@ impl PySystem {
 
     /// Solve for equilibrium concentrations.
     fn equilibrium(&self) -> PyResult<PyEquilibrium> {
-        // Build the Rust System from stored inputs
+        // Build the Rust System from stored inputs.
+        // The map_err calls below are defensive: PySystem validates eagerly
+        // in monomer()/complex(), so these Rust-side errors cannot occur.
         let mut sys = crate::System::new().temperature(self.temperature).map_err(map_err)?;
         for (name, conc) in &self.monomers {
             sys = sys.monomer(name, *conc).map_err(map_err)?;

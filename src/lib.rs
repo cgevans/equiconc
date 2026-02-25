@@ -350,7 +350,8 @@ fn dogleg_step(grad: &DVector<f64>, hessian: &DMatrix<f64>, delta: f64) -> DVect
     let chol = match nalgebra::linalg::Cholesky::new(hessian.clone()) {
         Some(c) => c,
         None => {
-            // Fallback to scaled steepest-descent
+            // Defensive: H = A diag(c) Aᵀ with all c > 0, so H is always
+            // positive-definite and Cholesky cannot fail in practice.
             let g_norm = grad.norm();
             if g_norm == 0.0 {
                 return DVector::zeros(grad.len());
@@ -423,6 +424,8 @@ fn solve_dual(
         let actual_reduction = eval.f - eval_new.f;
         let predicted_reduction = -(eval.grad.dot(&p) + 0.5 * p.dot(&(&eval.hessian * &p)));
 
+        // Defensive: near-zero predicted reduction only occurs with
+        // near-machine-epsilon steps, effectively unreachable.
         let rho = if predicted_reduction.abs() < 1e-30 {
             if actual_reduction >= 0.0 {
                 1.0
@@ -446,6 +449,8 @@ fn solve_dual(
         }
     }
 
+    // Defensive: the convex dual always converges for valid inputs,
+    // so this path is unreachable in practice.
     let final_eval = evaluate(a, log_q, c0, &lambda);
     Err(EquilibriumError::ConvergenceFailure {
         iterations: MAX_ITER,
@@ -653,6 +658,123 @@ mod tests {
             .monomer("B", 1e-9).unwrap()
             .complex("AB", &[("A", 0), ("B", 1)], -10.0).unwrap_err();
         assert!(matches!(err, EquilibriumError::ZeroCount(ref n) if n == "A"));
+    }
+
+    #[test]
+    fn empty_composition() {
+        let err = System::new()
+            .monomer("A", 1e-9).unwrap()
+            .complex("X", &[], -10.0).unwrap_err();
+        assert!(matches!(err, EquilibriumError::EmptyComposition));
+    }
+
+    #[test]
+    fn unknown_monomer() {
+        let err = System::new()
+            .monomer("A", 1e-9).unwrap()
+            .complex("AB", &[("A", 1), ("Z", 1)], -10.0).unwrap_err();
+        assert!(matches!(err, EquilibriumError::UnknownMonomer(ref n) if n == "Z"));
+    }
+
+    #[test]
+    fn concentration_unknown_name() {
+        let eq = System::new()
+            .monomer("A", 1e-9).unwrap()
+            .equilibrium().unwrap();
+        assert!(eq.concentration("nonexistent").is_none());
+    }
+
+    #[test]
+    fn error_display() {
+        let cases: Vec<(EquilibriumError, &str)> = vec![
+            (EquilibriumError::NoMonomers, "no monomers"),
+            (EquilibriumError::UnknownMonomer("X".into()), "unknown monomer"),
+            (EquilibriumError::EmptyComposition, "empty composition"),
+            (EquilibriumError::InvalidConcentration(-1.0), "invalid concentration"),
+            (EquilibriumError::InvalidTemperature(-1.0), "invalid temperature"),
+            (EquilibriumError::DuplicateMonomer("A".into()), "duplicate monomer"),
+            (EquilibriumError::DuplicateComplex("AB".into()), "duplicate complex"),
+            (EquilibriumError::ZeroCount("A".into()), "zero stoichiometric count"),
+            (EquilibriumError::ConvergenceFailure { iterations: 100, gradient_norm: 1.0 }, "did not converge"),
+        ];
+        for (err, expected_substr) in &cases {
+            let msg = err.to_string();
+            assert!(
+                msg.contains(expected_substr),
+                "expected {:?} to contain {:?}, got {:?}",
+                err, expected_substr, msg,
+            );
+        }
+    }
+
+    #[test]
+    fn dogleg_newton_within_trust_region() {
+        // When Newton step is within trust region, dogleg should return it exactly
+        let h = DMatrix::from_row_slice(2, 2, &[2.0, 0.0, 0.0, 2.0]);
+        let g = DVector::from_vec(vec![1.0, 1.0]);
+        // Newton step = -H⁻¹g = [-0.5, -0.5], norm ≈ 0.707
+        let p = dogleg_step(&g, &h, 10.0);
+        assert!((p[0] - (-0.5)).abs() < 1e-12);
+        assert!((p[1] - (-0.5)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn dogleg_cauchy_clipped() {
+        // When trust region is very small, should return scaled gradient direction
+        let h = DMatrix::from_row_slice(2, 2, &[2.0, 0.0, 0.0, 2.0]);
+        let g = DVector::from_vec(vec![1.0, 1.0]);
+        let delta = 0.01; // Much smaller than Cauchy step norm
+        let p = dogleg_step(&g, &h, delta);
+        let p_norm = p.norm();
+        assert!(
+            (p_norm - delta).abs() < 1e-12,
+            "step norm {} should equal delta {}",
+            p_norm, delta,
+        );
+        // Direction should be opposite to gradient
+        let cos_angle = p.dot(&g) / (p_norm * g.norm());
+        assert!(cos_angle < -0.99, "step should be opposite gradient");
+    }
+
+    #[test]
+    fn dogleg_interpolation() {
+        // Trust region between Cauchy and Newton norms → dog-leg interpolation
+        let h = DMatrix::from_row_slice(2, 2, &[4.0, 0.0, 0.0, 1.0]);
+        let g = DVector::from_vec(vec![2.0, 2.0]);
+        // Newton step = -H⁻¹g = [-0.5, -2.0], norm ≈ 2.06
+        // Cauchy: gtg=8, Hg=[8,2], gHg=20, alpha=8/20=0.4, p_c = -0.4*g = [-0.8,-0.8], norm≈1.13
+        let p_c_norm = 0.4 * g.norm();
+        let p_n_norm = (0.25 + 4.0_f64).sqrt();
+        let delta = (p_c_norm + p_n_norm) / 2.0; // Between Cauchy and Newton
+        let p = dogleg_step(&g, &h, delta);
+        let p_norm = p.norm();
+        assert!(
+            (p_norm - delta).abs() < 1e-10,
+            "step norm {} should equal delta {}",
+            p_norm, delta,
+        );
+    }
+
+    #[test]
+    fn trust_region_adjustment() {
+        // A system with many competing complexes and asymmetric concentrations
+        // to exercise trust region shrink/expand during iteration.
+        let sys = System::new()
+            .monomer("A", 1e-6).unwrap()
+            .monomer("B", 1e-8).unwrap()
+            .complex("AB", &[("A", 1), ("B", 1)], -15.0).unwrap()
+            .complex("A2B", &[("A", 2), ("B", 1)], -20.0).unwrap()
+            .complex("AB2", &[("A", 1), ("B", 2)], -18.0).unwrap();
+        let eq = sys.equilibrium().unwrap();
+
+        // Verify mass conservation
+        let a = eq.concentration("A").unwrap();
+        let b = eq.concentration("B").unwrap();
+        let ab = eq.concentration("AB").unwrap();
+        let a2b = eq.concentration("A2B").unwrap();
+        let ab2 = eq.concentration("AB2").unwrap();
+        assert!((a + ab + 2.0 * a2b + ab2 - 1e-6).abs() < 1e-5 * 1e-6);
+        assert!((b + ab + a2b + 2.0 * ab2 - 1e-8).abs() < 1e-5 * 1e-8);
     }
 }
 
