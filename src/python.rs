@@ -111,7 +111,7 @@ impl PySystem {
 /// Result of an equilibrium calculation.
 ///
 /// Supports dict-like access: `eq["A"]`, `"A" in eq`, `len(eq)`.
-#[pyclass(name = "Equilibrium")]
+#[pyclass(name = "Equilibrium", module = "equiconc")]
 struct PyEquilibrium {
     concentrations: HashMap<String, f64>,
     monomer_names: Vec<String>,

@@ -7,8 +7,8 @@ edition = "2024"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-nalgebra = "0.33"
-pyo3 = { version = "0.28", optional = true, features = ["extension-module"] }
+nalgebra = "0.34"
+pyo3 = { version = "0.28", optional = true, features = ["extension-module", "abi3-py39"] }
 
 [features]
 default = []
