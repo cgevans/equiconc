@@ -8,8 +8,15 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 nalgebra = "0.34"
-pyo3 = { version = "0.28", optional = true, features = ["extension-module", "abi3-py39"] }
+pyo3 = { version = "0.28", optional = true, features = ["extension-module", "abi3-py310"] }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [features]
 default = []
 python = ["pyo3"]
+
+[[bench]]
+name = "equilibrium"
+harness = false

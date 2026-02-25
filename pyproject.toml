@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "equiconc"
 version = "0.1.0"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 
 [tool.maturin]
 features = ["python"]
@@ -16,4 +16,6 @@ dev = [
     "ipywidgets>=8.1.8",
     "matplotlib>=3.9",
     "numpy>=2.0",
+    "pytest>=9.0",
+    "pytest-cov>=6.0",
 ]
