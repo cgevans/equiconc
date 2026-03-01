@@ -166,3 +166,33 @@ def test_zero_count_error():
             .monomer("B", 1e-9)
             .complex("AB", [("A", 0), ("B", 1)], delta_g=-10.0)
         )
+
+
+def test_duplicate_monomer_in_composition_error():
+    with pytest.raises(ValueError, match="duplicate monomer in composition"):
+        (
+            equiconc.System()
+            .monomer("A", 1e-9)
+            .monomer("B", 1e-9)
+            .complex("AB", [("A", 1), ("A", 2)], delta_g=-10.0)
+        )
+
+
+def test_nan_delta_g_error():
+    with pytest.raises(ValueError, match="invalid delta_g"):
+        (
+            equiconc.System()
+            .monomer("A", 1e-9)
+            .monomer("B", 1e-9)
+            .complex("AB", [("A", 1), ("B", 1)], delta_g=float("nan"))
+        )
+
+
+def test_inf_delta_g_error():
+    with pytest.raises(ValueError, match="invalid delta_g"):
+        (
+            equiconc.System()
+            .monomer("A", 1e-9)
+            .monomer("B", 1e-9)
+            .complex("AB", [("A", 1), ("B", 1)], delta_g=float("inf"))
+        )

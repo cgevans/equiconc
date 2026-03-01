@@ -81,6 +81,11 @@ impl PySystem {
         if composition.is_empty() {
             return Err(PyValueError::new_err("complex has empty composition"));
         }
+        if !delta_g.is_finite() {
+            return Err(PyValueError::new_err(format!(
+                "invalid delta_g: {delta_g} (must be finite)"
+            )));
+        }
         {
             let mut inner = slf.borrow_mut(py);
             // Check for duplicate complex name (also reject collision with monomer names)
@@ -93,6 +98,7 @@ impl PySystem {
             }
             // Eagerly validate monomer names and counts
             let known: Vec<&str> = inner.monomers.iter().map(|(n, _)| n.as_str()).collect();
+            let mut seen_monomers: Vec<&str> = Vec::new();
             for (monomer_name, count) in &composition {
                 if *count == 0 {
                     return Err(PyValueError::new_err(format!(
@@ -104,6 +110,12 @@ impl PySystem {
                         "unknown monomer: {monomer_name}"
                     )));
                 }
+                if seen_monomers.contains(&monomer_name.as_str()) {
+                    return Err(PyValueError::new_err(format!(
+                        "duplicate monomer in composition: {monomer_name}"
+                    )));
+                }
+                seen_monomers.push(monomer_name.as_str());
             }
             inner.complexes.push((name.to_string(), composition, delta_g));
         }

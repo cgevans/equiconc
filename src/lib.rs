@@ -17,6 +17,8 @@ pub enum EquilibriumError {
     DuplicateMonomer(String),
     DuplicateComplex(String),
     ZeroCount(String),
+    DuplicateMonomerInComposition(String),
+    InvalidDeltaG(f64),
     ConvergenceFailure {
         iterations: usize,
         gradient_norm: f64,
@@ -39,6 +41,12 @@ impl std::fmt::Display for EquilibriumError {
             Self::DuplicateComplex(name) => write!(f, "duplicate complex: {name}"),
             Self::ZeroCount(name) => {
                 write!(f, "zero stoichiometric count for monomer: {name}")
+            }
+            Self::DuplicateMonomerInComposition(name) => {
+                write!(f, "duplicate monomer in composition: {name}")
+            }
+            Self::InvalidDeltaG(dg) => {
+                write!(f, "invalid delta_g: {dg} (must be finite)")
             }
             Self::ConvergenceFailure {
                 iterations,
@@ -126,6 +134,9 @@ impl System {
         if composition.is_empty() {
             return Err(EquilibriumError::EmptyComposition);
         }
+        if !delta_g.is_finite() {
+            return Err(EquilibriumError::InvalidDeltaG(delta_g));
+        }
         if self.complexes.iter().any(|c| c.name == name)
             || self.monomers.iter().any(|m| m.name == name)
         {
@@ -141,6 +152,11 @@ impl System {
                 .iter()
                 .position(|m| m.name == monomer_name)
                 .ok_or_else(|| EquilibriumError::UnknownMonomer(monomer_name.to_string()))?;
+            if comp.iter().any(|&(existing_idx, _)| existing_idx == idx) {
+                return Err(EquilibriumError::DuplicateMonomerInComposition(
+                    monomer_name.to_string(),
+                ));
+            }
             comp.push((idx, count));
         }
         self.complexes.push(Complex {
@@ -232,19 +248,19 @@ impl System {
                     c0[i]
                 );
             }
-            // Equilibrium condition
+            // Equilibrium condition (in log-space to avoid overflow)
             for (k, cplx) in self.complexes.iter().enumerate() {
-                let k_eq = (-cplx.delta_g / rt).exp();
-                let mut product = 1.0;
+                let log_keq = -cplx.delta_g / rt;
+                let mut log_expected = log_keq;
                 for &(mi, count) in &cplx.composition {
-                    product *= concentrations[mi].powi(count as i32);
+                    log_expected += count as f64 * concentrations[mi].ln();
                 }
-                let expected = k_eq * product;
-                let actual = concentrations[n_mon + k];
-                let rel_err = (actual - expected).abs() / (expected + 1e-300);
+                let log_actual = concentrations[n_mon + k].ln();
+                let rel_err = (log_actual - log_expected).abs()
+                    / (log_expected.abs() + 1e-30);
                 debug_assert!(
                     rel_err < 1e-6,
-                    "equilibrium condition violated for {}: {actual} != {expected} (rel err: {rel_err})",
+                    "equilibrium condition violated for {}: log(actual)={log_actual} != log(expected)={log_expected} (rel err: {rel_err})",
                     cplx.name
                 );
             }
@@ -264,8 +280,8 @@ impl System {
 // ---------------------------------------------------------------------------
 
 pub struct Equilibrium {
-    pub(crate) monomer_names: Vec<String>,
-    pub(crate) complex_names: Vec<String>,
+    pub monomer_names: Vec<String>,
+    pub complex_names: Vec<String>,
     pub free_monomer_concentrations: Vec<f64>,
     pub complex_concentrations: Vec<f64>,
 }
@@ -372,6 +388,14 @@ fn dogleg_step(grad: &DVector<f64>, hessian: &DMatrix<f64>, delta: f64) -> DVect
     let gtg = grad.dot(grad);
     let hg = hessian * grad;
     let gthg = grad.dot(&hg);
+
+    // Guard against near-zero curvature: fall back to steepest descent
+    // clipped to trust region, same as the Cholesky failure path.
+    if gthg < 1e-30 * gtg {
+        let g_norm = grad.norm();
+        return -(delta / g_norm) * grad;
+    }
+
     let p_c = -(gtg / gthg) * grad;
     let p_c_norm = p_c.norm();
 
@@ -453,8 +477,21 @@ fn solve_dual(
                 stagnation = 0;
                 continue;
             }
-            // Recovery failed — already at best achievable point.
-            return Ok(lambda);
+            // Recovery failed — accept if close enough with relaxed tolerance
+            // (the solver is at f64 precision limits), otherwise report failure.
+            const STAG_RTOL: f64 = 1e-4;
+            if eval
+                .grad
+                .iter()
+                .zip(c0.iter())
+                .all(|(&g, &c)| g.abs() < ATOL + STAG_RTOL * c)
+            {
+                return Ok(lambda);
+            }
+            return Err(EquilibriumError::ConvergenceFailure {
+                iterations: MAX_ITER,
+                gradient_norm: eval.grad.norm(),
+            });
         }
 
         let rho = if predicted_reduction.abs() < 1e-30 {
@@ -726,6 +763,8 @@ mod tests {
             (EquilibriumError::DuplicateMonomer("A".into()), "duplicate monomer"),
             (EquilibriumError::DuplicateComplex("AB".into()), "duplicate complex"),
             (EquilibriumError::ZeroCount("A".into()), "zero stoichiometric count"),
+            (EquilibriumError::DuplicateMonomerInComposition("A".into()), "duplicate monomer in composition"),
+            (EquilibriumError::InvalidDeltaG(f64::NAN), "invalid delta_g"),
             (EquilibriumError::ConvergenceFailure { iterations: 100, gradient_norm: 1.0 }, "did not converge"),
         ];
         for (err, expected_substr) in &cases {
@@ -736,6 +775,53 @@ mod tests {
                 err, expected_substr, msg,
             );
         }
+    }
+
+    #[test]
+    fn duplicate_monomer_in_composition() {
+        let err = System::new()
+            .monomer("A", 1e-9).unwrap()
+            .monomer("B", 1e-9).unwrap()
+            .complex("AB", &[("A", 1), ("A", 2)], -10.0).unwrap_err();
+        assert!(matches!(err, EquilibriumError::DuplicateMonomerInComposition(ref n) if n == "A"));
+    }
+
+    #[test]
+    fn nan_delta_g() {
+        let err = System::new()
+            .monomer("A", 1e-9).unwrap()
+            .monomer("B", 1e-9).unwrap()
+            .complex("AB", &[("A", 1), ("B", 1)], f64::NAN).unwrap_err();
+        assert!(matches!(err, EquilibriumError::InvalidDeltaG(_)));
+    }
+
+    #[test]
+    fn inf_delta_g() {
+        let err = System::new()
+            .monomer("A", 1e-9).unwrap()
+            .monomer("B", 1e-9).unwrap()
+            .complex("AB", &[("A", 1), ("B", 1)], f64::INFINITY).unwrap_err();
+        assert!(matches!(err, EquilibriumError::InvalidDeltaG(_)));
+    }
+
+    #[test]
+    fn neg_inf_delta_g() {
+        let err = System::new()
+            .monomer("A", 1e-9).unwrap()
+            .monomer("B", 1e-9).unwrap()
+            .complex("AB", &[("A", 1), ("B", 1)], f64::NEG_INFINITY).unwrap_err();
+        assert!(matches!(err, EquilibriumError::InvalidDeltaG(_)));
+    }
+
+    #[test]
+    fn public_name_fields() {
+        let eq = System::new()
+            .monomer("A", 1e-9).unwrap()
+            .monomer("B", 1e-9).unwrap()
+            .complex("AB", &[("A", 1), ("B", 1)], -10.0).unwrap()
+            .equilibrium().unwrap();
+        assert_eq!(eq.monomer_names, vec!["A", "B"]);
+        assert_eq!(eq.complex_names, vec!["AB"]);
     }
 
     #[test]

@@ -52,6 +52,8 @@ Debug-mode assertions verify mass conservation and equilibrium conditions post-s
 
 Gated behind the `python` Cargo feature. `PySystem` mirrors the Rust builder; `PyEquilibrium` provides dict-like access (`eq["AB"]`, `"AB" in eq`) plus `to_dict()` and property getters.
 
+Python uses `uv` for management.  Do not use `pip`, and prefer things like `uv add` over `uv pip install`, including using dependency groups, unless absolutely necessary.
+
 ### Dependencies
 
 - **nalgebra** — matrix/vector ops and Cholesky decomposition
