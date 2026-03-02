@@ -97,15 +97,15 @@ def test_no_monomers_error():
 
 
 def test_unknown_monomer_error():
-    sys = equiconc.System().monomer("A", 50e-9)
+    sys = equiconc.System().monomer("A", 50e-9).complex("AB", [("A", 1), ("B", 1)], delta_g=-10.0)
     with pytest.raises(ValueError, match="unknown monomer"):
-        sys.complex("AB", [("A", 1), ("B", 1)], delta_g=-10.0)
+        sys.equilibrium()
 
 
 def test_empty_composition_error():
-    sys = equiconc.System().monomer("A", 50e-9)
+    sys = equiconc.System().monomer("A", 50e-9).complex("X", [], delta_g=-10.0)
     with pytest.raises(ValueError, match="empty composition"):
-        sys.complex("X", [], delta_g=-10.0)
+        sys.equilibrium()
 
 
 def test_custom_temperature():
@@ -124,27 +124,27 @@ def test_repr():
 
 def test_negative_concentration_error():
     with pytest.raises(ValueError, match="invalid concentration"):
-        equiconc.System().monomer("A", -1e-9)
+        equiconc.System().monomer("A", -1e-9).equilibrium()
 
 
 def test_zero_concentration_error():
     with pytest.raises(ValueError, match="invalid concentration"):
-        equiconc.System().monomer("A", 0.0)
+        equiconc.System().monomer("A", 0.0).equilibrium()
 
 
 def test_zero_temperature_error():
     with pytest.raises(ValueError, match="invalid temperature"):
-        equiconc.System(temperature=0.0)
+        equiconc.System(temperature=0.0).monomer("A", 1e-9).equilibrium()
 
 
 def test_negative_temperature_error():
     with pytest.raises(ValueError, match="invalid temperature"):
-        equiconc.System(temperature=-100.0)
+        equiconc.System(temperature=-100.0).monomer("A", 1e-9).equilibrium()
 
 
 def test_duplicate_monomer_error():
     with pytest.raises(ValueError, match="duplicate monomer"):
-        equiconc.System().monomer("A", 1e-9).monomer("A", 2e-9)
+        equiconc.System().monomer("A", 1e-9).monomer("A", 2e-9).equilibrium()
 
 
 def test_duplicate_complex_error():
@@ -155,6 +155,7 @@ def test_duplicate_complex_error():
             .monomer("B", 1e-9)
             .complex("AB", [("A", 1), ("B", 1)], delta_g=-10.0)
             .complex("AB", [("A", 1), ("B", 1)], delta_g=-12.0)
+            .equilibrium()
         )
 
 
@@ -165,6 +166,7 @@ def test_zero_count_error():
             .monomer("A", 1e-9)
             .monomer("B", 1e-9)
             .complex("AB", [("A", 0), ("B", 1)], delta_g=-10.0)
+            .equilibrium()
         )
 
 
@@ -175,6 +177,7 @@ def test_duplicate_monomer_in_composition_error():
             .monomer("A", 1e-9)
             .monomer("B", 1e-9)
             .complex("AB", [("A", 1), ("A", 2)], delta_g=-10.0)
+            .equilibrium()
         )
 
 
@@ -185,6 +188,7 @@ def test_nan_delta_g_error():
             .monomer("A", 1e-9)
             .monomer("B", 1e-9)
             .complex("AB", [("A", 1), ("B", 1)], delta_g=float("nan"))
+            .equilibrium()
         )
 
 
@@ -195,4 +199,74 @@ def test_inf_delta_g_error():
             .monomer("A", 1e-9)
             .monomer("B", 1e-9)
             .complex("AB", [("A", 1), ("B", 1)], delta_g=float("inf"))
+            .equilibrium()
+        )
+
+
+def test_iter():
+    sys = (
+        equiconc.System()
+        .monomer("A", 50e-9)
+        .monomer("B", 100e-9)
+        .complex("AB", [("A", 1), ("B", 1)], delta_g=-10.0)
+    )
+    eq = sys.equilibrium()
+    names = list(eq)
+    assert names == ["A", "B", "AB"]
+
+
+def test_keys_values_items():
+    sys = (
+        equiconc.System()
+        .monomer("A", 50e-9)
+        .monomer("B", 100e-9)
+        .complex("AB", [("A", 1), ("B", 1)], delta_g=-10.0)
+    )
+    eq = sys.equilibrium()
+    assert eq.keys() == ["A", "B", "AB"]
+    assert len(eq.values()) == 3
+    assert all(isinstance(v, float) for v in eq.values())
+    items = eq.items()
+    assert len(items) == 3
+    assert items[0][0] == "A"
+    assert items[1][0] == "B"
+    assert items[2][0] == "AB"
+
+
+def test_to_dict_order():
+    sys = (
+        equiconc.System()
+        .monomer("A", 50e-9)
+        .monomer("B", 100e-9)
+        .complex("AB", [("A", 1), ("B", 1)], delta_g=-10.0)
+    )
+    eq = sys.equilibrium()
+    d = eq.to_dict()
+    assert list(d.keys()) == ["A", "B", "AB"]
+
+
+def test_converged_fully():
+    sys = equiconc.System().monomer("A", 50e-9)
+    eq = sys.equilibrium()
+    assert eq.converged_fully is True
+
+
+def test_empty_monomer_name_error():
+    with pytest.raises(ValueError, match="must not be empty"):
+        equiconc.System().monomer("", 1e-9).equilibrium()
+
+
+def test_empty_complex_name_error():
+    with pytest.raises(ValueError, match="must not be empty"):
+        equiconc.System().monomer("A", 1e-9).complex("", [("A", 1)], delta_g=-10.0).equilibrium()
+
+
+def test_complex_name_collides_with_monomer():
+    with pytest.raises(ValueError, match="species name already in use"):
+        (
+            equiconc.System()
+            .monomer("A", 1e-9)
+            .monomer("B", 1e-9)
+            .complex("A", [("A", 1), ("B", 1)], delta_g=-10.0)
+            .equilibrium()
         )

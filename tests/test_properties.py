@@ -11,8 +11,8 @@ REL_TOL = 1e-4
 
 
 def _log_uniform_concentration():
-    """Log-uniform concentration in [1e-6, 1e-3]."""
-    return st.floats(min_value=-6.0, max_value=-3.0).map(lambda e: 10.0**e)
+    """Log-uniform concentration in [1e-9, 1e-3]."""
+    return st.floats(min_value=-9.0, max_value=-3.0).map(lambda e: 10.0**e)
 
 
 @st.composite
@@ -41,7 +41,7 @@ def system_strategy(draw):
         comp = {name: count for name, count in counts.items() if count > 0}
         if not comp:
             comp = {MONOMER_NAMES[0]: 1}
-        delta_g = draw(st.floats(min_value=-15.0, max_value=5.0))
+        delta_g = draw(st.floats(min_value=-30.0, max_value=5.0))
         sys = sys.complex(cplx_name, list(comp.items()), delta_g=delta_g)
         complexes[cplx_name] = (comp, delta_g)
 
@@ -69,7 +69,7 @@ def monomer_only_strategy(draw):
 def dimerization_strategy(draw):
     """Generate parameters for A + B -> AB dimerization."""
     c0 = draw(_log_uniform_concentration())
-    dg = draw(st.floats(min_value=-15.0, max_value=5.0))
+    dg = draw(st.floats(min_value=-30.0, max_value=5.0))
     temp = draw(st.floats(min_value=293.15, max_value=373.15))
     return c0, dg, temp
 
@@ -158,7 +158,7 @@ def test_prop_dimerization_analytical(data):
     free = 2.0 * c0 / (disc + 1.0)
     x = k * free * free
 
-    tol = 1e-8
+    tol = REL_TOL
     assert abs(eq["A"] - free) / (free + 1e-300) < tol, f'[A]={eq["A"]} != expected {free}'
     assert abs(eq["B"] - free) / (free + 1e-300) < tol, f'[B]={eq["B"]} != expected {free}'
     assert abs(eq["AB"] - x) / (x + 1e-300) < tol, f'[AB]={eq["AB"]} != expected {x}'

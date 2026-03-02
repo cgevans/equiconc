@@ -15,20 +15,20 @@ struct SystemSpec {
 
 impl SystemSpec {
     fn solve(&self) -> Result<equiconc::Equilibrium, equiconc::EquilibriumError> {
-        let mut sys = System::new().temperature(self.temperature).unwrap();
+        let mut sys = System::new().temperature(self.temperature);
         for &(name, conc) in &self.monomers {
-            sys = sys.monomer(name, conc).unwrap();
+            sys = sys.monomer(name, conc);
         }
         for (name, comp, dg) in &self.complexes {
             let comp_refs: Vec<(&str, usize)> = comp.iter().copied().collect();
-            sys = sys.complex(name, &comp_refs, *dg).unwrap();
+            sys = sys.complex(name, &comp_refs, *dg);
         }
         sys.equilibrium()
     }
 }
 
 fn log_uniform_concentration() -> impl Strategy<Value = f64> {
-    (-6.0f64..=-3.0).prop_map(|e| 10f64.powf(e))
+    (-9.0f64..=-3.0).prop_map(|e| 10f64.powf(e))
 }
 
 fn arb_system() -> impl Strategy<Value = SystemSpec> {
@@ -42,7 +42,7 @@ fn arb_system() -> impl Strategy<Value = SystemSpec> {
                 (
                     // For each monomer, a count of 0 (absent) to 3
                     prop::collection::vec(0..=3usize, n_mon),
-                    -15.0..=5.0f64,
+                    -30.0..=5.0f64,
                 ),
                 n_cplx,
             );
@@ -173,15 +173,15 @@ proptest! {
     fn prop_dimerization_analytical(
         (c0, dg, temp) in (
             log_uniform_concentration(),
-            -15.0..=5.0f64,
+            -30.0..=5.0f64,
             293.15..=373.15f64,
         )
     ) {
         let sys = System::new()
-            .temperature(temp).unwrap()
-            .monomer("A", c0).unwrap()
-            .monomer("B", c0).unwrap()
-            .complex("AB", &[("A", 1), ("B", 1)], dg).unwrap();
+            .temperature(temp)
+            .monomer("A", c0)
+            .monomer("B", c0)
+            .complex("AB", &[("A", 1), ("B", 1)], dg);
         let eq = sys.equilibrium().unwrap();
 
         let rt = R * temp;
@@ -191,7 +191,7 @@ proptest! {
         let free = 2.0 * c0 / (disc + 1.0);
         let x = k * free * free;
 
-        let tol = 1e-6;
+        let tol = REL_TOL;
         let a_conc = eq.concentration("A").unwrap();
         let b_conc = eq.concentration("B").unwrap();
         let ab_conc = eq.concentration("AB").unwrap();

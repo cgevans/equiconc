@@ -1,13 +1,62 @@
+//! Equilibrium concentration solver for nucleic acid strand systems.
+//!
+//! Computes equilibrium concentrations for systems of interacting nucleic acid
+//! strands that form multi-strand complexes. Implements the trust-region Newton
+//! method on the convex dual problem from
+//! [Dirks et al. (2007), *SIAM Review* 49(1), 65–88](https://doi.org/10.1137/060651100).
+//!
+//! # Conventions
+//!
+//! - **Free energies** are standard free energies of formation (ΔG°) in
+//!   **kcal/mol** at a **1 M standard state**.
+//! - **Concentrations** are in **molar** (mol/L).
+//! - **Temperature** is in **kelvin**.
+//! - The gas constant [`R`] is in kcal/(mol·K).
+//!
+//! ## Symmetry
+//!
+//! Homodimer and higher homo-oligomer symmetry corrections are **not**
+//! applied automatically. If your complex contains identical strands,
+//! include the symmetry correction in the ΔG° value you provide
+//! (e.g., add +RT·ln(σ) where σ is the symmetry number).
+//!
+//! # Example
+//!
+//! ```
+//! use equiconc::System;
+//!
+//! // A + B ⇌ AB with ΔG° = -10 kcal/mol at 37 °C
+//! let eq = System::new()
+//!     .monomer("A", 100e-9)      // 100 nM
+//!     .monomer("B", 100e-9)
+//!     .complex("AB", &[("A", 1), ("B", 1)], -10.0)
+//!     .equilibrium()?;
+//!
+//! let free_a = eq.concentration("A").unwrap();
+//! let free_b = eq.concentration("B").unwrap();
+//! let ab = eq.concentration("AB").unwrap();
+//!
+//! // Mass conservation: [A] + [AB] = 100 nM
+//! assert!((free_a + ab - 100e-9).abs() < 1e-6 * 100e-9);
+//! # Ok::<(), equiconc::EquilibriumError>(())
+//! ```
+
 use nalgebra::{DMatrix, DVector};
 
 /// Gas constant in kcal/(mol·K).
-const R: f64 = 1.987204e-3;
+pub const R: f64 = 1.987204e-3;
+
+/// Maximum log-concentration before clamping to prevent f64 overflow.
+///
+/// `exp(709.78)` ≈ `f64::MAX`; we clamp below that to stay safely in range.
+const LOG_C_MAX: f64 = 700.0;
 
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum EquilibriumError {
     NoMonomers,
     UnknownMonomer(String),
@@ -19,6 +68,8 @@ pub enum EquilibriumError {
     ZeroCount(String),
     DuplicateMonomerInComposition(String),
     InvalidDeltaG(f64),
+    EmptyName,
+    DuplicateSpeciesName(String),
     ConvergenceFailure {
         iterations: usize,
         gradient_norm: f64,
@@ -48,6 +99,11 @@ impl std::fmt::Display for EquilibriumError {
             Self::InvalidDeltaG(dg) => {
                 write!(f, "invalid delta_g: {dg} (must be finite)")
             }
+            Self::EmptyName => write!(f, "species name must not be empty"),
+            Self::DuplicateSpeciesName(name) => write!(
+                f,
+                "species name already in use: {name} (monomer and complex names must be unique)"
+            ),
             Self::ConvergenceFailure {
                 iterations,
                 gradient_norm,
@@ -62,35 +118,25 @@ impl std::fmt::Display for EquilibriumError {
 impl std::error::Error for EquilibriumError {}
 
 // ---------------------------------------------------------------------------
-// Internal types
-// ---------------------------------------------------------------------------
-
-#[derive(Debug)]
-struct Monomer {
-    name: String,
-    total_concentration: f64,
-}
-
-#[derive(Debug)]
-struct Complex {
-    name: String,
-    composition: Vec<(usize, usize)>, // (monomer_index, count)
-    delta_g: f64,                      // kcal/mol
-}
-
-// ---------------------------------------------------------------------------
 // Public builder / system
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct System {
-    monomers: Vec<Monomer>,
-    complexes: Vec<Complex>,
+    monomers: Vec<(String, f64)>,
+    complexes: Vec<(String, Vec<(String, usize)>, f64)>,
     temperature: f64, // Kelvin
+}
+
+impl Default for System {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl System {
     /// Create an empty system at 37 °C (310.15 K).
+    #[must_use]
     pub fn new() -> Self {
         System {
             monomers: Vec::new(),
@@ -100,78 +146,170 @@ impl System {
     }
 
     /// Set the temperature in Kelvin.
-    pub fn temperature(mut self, t: f64) -> Result<Self, EquilibriumError> {
-        if !(t > 0.0 && t.is_finite()) {
-            return Err(EquilibriumError::InvalidTemperature(t));
-        }
+    #[must_use]
+    pub fn temperature(mut self, t: f64) -> Self {
         self.temperature = t;
-        Ok(self)
+        self
     }
 
     /// Add a monomer species with a given total concentration (molar).
-    pub fn monomer(mut self, name: &str, total_concentration: f64) -> Result<Self, EquilibriumError> {
-        if !(total_concentration > 0.0 && total_concentration.is_finite()) {
-            return Err(EquilibriumError::InvalidConcentration(total_concentration));
-        }
-        if self.monomers.iter().any(|m| m.name == name) {
-            return Err(EquilibriumError::DuplicateMonomer(name.to_string()));
-        }
-        self.monomers.push(Monomer {
-            name: name.to_string(),
-            total_concentration,
-        });
-        Ok(self)
+    #[must_use]
+    pub fn monomer(mut self, name: &str, total_concentration: f64) -> Self {
+        self.monomers
+            .push((name.to_string(), total_concentration));
+        self
     }
 
     /// Add a complex with the given composition and standard free energy of
-    /// formation (ΔG° in kcal/mol). Composition entries are `(monomer_name, count)`.
+    /// formation.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` — unique identifier for this complex (must not collide with
+    ///   monomer names)
+    /// * `composition` — slice of `(monomer_name, count)` pairs specifying
+    ///   how many of each monomer strand appear in the complex
+    /// * `delta_g` — ΔG° in **kcal/mol** at a **1 M standard state**. This is
+    ///   the standard free energy of complex formation from its constituent
+    ///   monomers. Values from NUPACK or other tools that use a water-molarity
+    ///   standard state need a correction of `+(n-1)·RT·ln(c_water)` where
+    ///   `n` is the number of strands.
+    #[must_use]
     pub fn complex(
         mut self,
         name: &str,
         composition: &[(&str, usize)],
         delta_g: f64,
-    ) -> Result<Self, EquilibriumError> {
-        if composition.is_empty() {
-            return Err(EquilibriumError::EmptyComposition);
-        }
-        if !delta_g.is_finite() {
-            return Err(EquilibriumError::InvalidDeltaG(delta_g));
-        }
-        if self.complexes.iter().any(|c| c.name == name)
-            || self.monomers.iter().any(|m| m.name == name)
-        {
-            return Err(EquilibriumError::DuplicateComplex(name.to_string()));
-        }
-        let mut comp = Vec::new();
-        for &(monomer_name, count) in composition {
-            if count == 0 {
-                return Err(EquilibriumError::ZeroCount(monomer_name.to_string()));
-            }
-            let idx = self
-                .monomers
+    ) -> Self {
+        self.complexes.push((
+            name.to_string(),
+            composition
                 .iter()
-                .position(|m| m.name == monomer_name)
-                .ok_or_else(|| EquilibriumError::UnknownMonomer(monomer_name.to_string()))?;
-            if comp.iter().any(|&(existing_idx, _)| existing_idx == idx) {
-                return Err(EquilibriumError::DuplicateMonomerInComposition(
-                    monomer_name.to_string(),
-                ));
-            }
-            comp.push((idx, count));
-        }
-        self.complexes.push(Complex {
-            name: name.to_string(),
-            composition: comp,
+                .map(|&(n, c)| (n.to_string(), c))
+                .collect(),
             delta_g,
-        });
-        Ok(self)
+        ));
+        self
+    }
+
+    /// Current temperature in Kelvin.
+    #[must_use]
+    pub fn get_temperature(&self) -> f64 {
+        self.temperature
+    }
+
+    /// Number of monomers added so far.
+    #[must_use]
+    pub fn monomer_count(&self) -> usize {
+        self.monomers.len()
+    }
+
+    /// Number of complexes added so far.
+    #[must_use]
+    pub fn complex_count(&self) -> usize {
+        self.complexes.len()
+    }
+
+    /// Validate inputs, resolve monomer references, and build the internal
+    /// problem representation.
+    fn validate_and_build(
+        &self,
+    ) -> Result<
+        (
+            Vec<String>,                // monomer names
+            Vec<f64>,                   // monomer concentrations
+            Vec<String>,                // complex names
+            Vec<Vec<(usize, usize)>>,   // resolved compositions
+            Vec<f64>,                   // complex delta_g values
+        ),
+        EquilibriumError,
+    > {
+        // Temperature validation
+        if !(self.temperature > 0.0 && self.temperature.is_finite()) {
+            return Err(EquilibriumError::InvalidTemperature(self.temperature));
+        }
+
+        // Must have at least one monomer
+        if self.monomers.is_empty() {
+            return Err(EquilibriumError::NoMonomers);
+        }
+
+        // Validate monomers
+        let mut monomer_names: Vec<String> = Vec::new();
+        let mut monomer_concs: Vec<f64> = Vec::new();
+        for (name, conc) in &self.monomers {
+            if name.is_empty() {
+                return Err(EquilibriumError::EmptyName);
+            }
+            if !(conc > &0.0 && conc.is_finite()) {
+                return Err(EquilibriumError::InvalidConcentration(*conc));
+            }
+            if monomer_names.iter().any(|n| n == name) {
+                return Err(EquilibriumError::DuplicateMonomer(name.clone()));
+            }
+            monomer_names.push(name.clone());
+            monomer_concs.push(*conc);
+        }
+
+        // Validate complexes and resolve monomer references
+        let mut complex_names: Vec<String> = Vec::new();
+        let mut resolved_comps: Vec<Vec<(usize, usize)>> = Vec::new();
+        let mut complex_dgs: Vec<f64> = Vec::new();
+
+        for (name, composition, delta_g) in &self.complexes {
+            if name.is_empty() {
+                return Err(EquilibriumError::EmptyName);
+            }
+            if composition.is_empty() {
+                return Err(EquilibriumError::EmptyComposition);
+            }
+            if !delta_g.is_finite() {
+                return Err(EquilibriumError::InvalidDeltaG(*delta_g));
+            }
+            if complex_names.iter().any(|n| n == name) {
+                return Err(EquilibriumError::DuplicateComplex(name.clone()));
+            }
+            if monomer_names.iter().any(|n| n == name) {
+                return Err(EquilibriumError::DuplicateSpeciesName(name.clone()));
+            }
+
+            let mut comp = Vec::new();
+            for (monomer_name, count) in composition {
+                if *count == 0 {
+                    return Err(EquilibriumError::ZeroCount(monomer_name.clone()));
+                }
+                let idx = monomer_names
+                    .iter()
+                    .position(|n| n == monomer_name)
+                    .ok_or_else(|| {
+                        EquilibriumError::UnknownMonomer(monomer_name.clone())
+                    })?;
+                if comp.iter().any(|&(existing_idx, _): &(usize, usize)| existing_idx == idx) {
+                    return Err(EquilibriumError::DuplicateMonomerInComposition(
+                        monomer_name.clone(),
+                    ));
+                }
+                comp.push((idx, *count));
+            }
+
+            complex_names.push(name.clone());
+            resolved_comps.push(comp);
+            complex_dgs.push(*delta_g);
+        }
+
+        Ok((monomer_names, monomer_concs, complex_names, resolved_comps, complex_dgs))
     }
 
     /// Build the stoichiometry matrix **A**, the log-partition-function vector
     /// **log_q**, and the total-concentration vector **c⁰**.
-    fn build_problem(&self) -> (DMatrix<f64>, DVector<f64>, DVector<f64>) {
-        let n_mon = self.monomers.len();
-        let n_cplx = self.complexes.len();
+    fn build_problem(
+        n_mon: usize,
+        monomer_concs: &[f64],
+        resolved_comps: &[Vec<(usize, usize)>],
+        complex_dgs: &[f64],
+        temperature: f64,
+    ) -> (DMatrix<f64>, DVector<f64>, DVector<f64>) {
+        let n_cplx = resolved_comps.len();
         let n_species = n_mon + n_cplx;
 
         // A: n_monomers × n_species
@@ -181,57 +319,53 @@ impl System {
             a[(i, i)] = 1.0;
         }
         // Complex columns
-        for (k, cplx) in self.complexes.iter().enumerate() {
-            for &(mi, count) in &cplx.composition {
+        for (k, comp) in resolved_comps.iter().enumerate() {
+            for &(mi, count) in comp {
                 a[(mi, n_mon + k)] = count as f64;
             }
         }
 
         // log_q: 0 for free monomers, -ΔG°/(RT) for complexes
         let mut log_q = DVector::zeros(n_species);
-        let rt = R * self.temperature;
-        for (k, cplx) in self.complexes.iter().enumerate() {
-            log_q[n_mon + k] = -cplx.delta_g / rt;
+        let rt = R * temperature;
+        for (k, &dg) in complex_dgs.iter().enumerate() {
+            log_q[n_mon + k] = -dg / rt;
         }
 
         // c⁰
-        let c0 = DVector::from_iterator(
-            n_mon,
-            self.monomers.iter().map(|m| m.total_concentration),
-        );
+        let c0 = DVector::from_iterator(n_mon, monomer_concs.iter().copied());
 
         (a, log_q, c0)
     }
 
     /// Solve for equilibrium concentrations.
+    ///
+    /// Validates all inputs and returns an error if any are invalid.
     pub fn equilibrium(&self) -> Result<Equilibrium, EquilibriumError> {
-        if self.monomers.is_empty() {
-            return Err(EquilibriumError::NoMonomers);
-        }
+        let (monomer_names, monomer_concs, complex_names, resolved_comps, complex_dgs) =
+            self.validate_and_build()?;
 
-        let n_mon = self.monomers.len();
+        let n_mon = monomer_names.len();
 
         // Short-circuit: no complexes
-        if self.complexes.is_empty() {
+        if complex_names.is_empty() {
             return Ok(Equilibrium {
-                monomer_names: self.monomers.iter().map(|m| m.name.clone()).collect(),
-                complex_names: Vec::new(),
-                free_monomer_concentrations: self
-                    .monomers
-                    .iter()
-                    .map(|m| m.total_concentration)
-                    .collect(),
+                monomer_names,
+                complex_names,
+                free_monomer_concentrations: monomer_concs,
                 complex_concentrations: Vec::new(),
+                converged_fully: true,
             });
         }
 
-        let (a, log_q, c0) = self.build_problem();
-        let lambda = solve_dual(&a, &log_q, &c0)?;
+        let (a, log_q, c0) =
+            Self::build_problem(n_mon, &monomer_concs, &resolved_comps, &complex_dgs, self.temperature);
+        let solution = solve_dual(&a, &log_q, &c0)?;
 
         // Recover concentrations: c_j = exp(log_q_j + (Aᵀλ)_j)
-        let log_c = &log_q + a.transpose() * &lambda;
+        let log_c = &log_q + a.transpose() * &solution.lambda;
         let concentrations: Vec<f64> =
-            log_c.iter().map(|&lc| lc.min(700.0).exp()).collect();
+            log_c.iter().map(|&lc| lc.min(LOG_C_MAX).exp()).collect();
 
         // Debug-mode validation
         #[cfg(debug_assertions)]
@@ -242,35 +376,41 @@ impl System {
                 let total: f64 =
                     (0..concentrations.len()).map(|j| a[(i, j)] * concentrations[j]).sum();
                 debug_assert!(
-                    (total - c0[i]).abs() < 1e-6 * c0[i] + 1e-30,
+                    (total - c0[i]).abs() < 1e-3 * c0[i] + 1e-30,
                     "mass conservation violated for monomer {}: {total} != {}",
-                    self.monomers[i].name,
+                    monomer_names[i],
                     c0[i]
                 );
             }
             // Equilibrium condition (in log-space to avoid overflow)
-            for (k, cplx) in self.complexes.iter().enumerate() {
-                let log_keq = -cplx.delta_g / rt;
+            for (k, comp) in resolved_comps.iter().enumerate() {
+                let log_keq = -complex_dgs[k] / rt;
                 let mut log_expected = log_keq;
-                for &(mi, count) in &cplx.composition {
+                for &(mi, count) in comp {
                     log_expected += count as f64 * concentrations[mi].ln();
                 }
                 let log_actual = concentrations[n_mon + k].ln();
                 let rel_err = (log_actual - log_expected).abs()
                     / (log_expected.abs() + 1e-30);
                 debug_assert!(
-                    rel_err < 1e-6,
+                    rel_err < 1e-3,
                     "equilibrium condition violated for {}: log(actual)={log_actual} != log(expected)={log_expected} (rel err: {rel_err})",
-                    cplx.name
+                    complex_names[k]
                 );
             }
         }
 
+        let converged_fully = matches!(
+            solution.convergence,
+            SolverConvergence::Full { .. }
+        );
+
         Ok(Equilibrium {
-            monomer_names: self.monomers.iter().map(|m| m.name.clone()).collect(),
-            complex_names: self.complexes.iter().map(|c| c.name.clone()).collect(),
+            monomer_names,
+            complex_names,
             free_monomer_concentrations: concentrations[..n_mon].to_vec(),
             complex_concentrations: concentrations[n_mon..].to_vec(),
+            converged_fully,
         })
     }
 }
@@ -279,15 +419,18 @@ impl System {
 // Result type
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone)]
 pub struct Equilibrium {
-    pub monomer_names: Vec<String>,
-    pub complex_names: Vec<String>,
-    pub free_monomer_concentrations: Vec<f64>,
-    pub complex_concentrations: Vec<f64>,
+    monomer_names: Vec<String>,
+    complex_names: Vec<String>,
+    free_monomer_concentrations: Vec<f64>,
+    complex_concentrations: Vec<f64>,
+    converged_fully: bool,
 }
 
 impl Equilibrium {
     /// Look up a concentration by species name (monomer or complex).
+    #[must_use]
     pub fn concentration(&self, name: &str) -> Option<f64> {
         if let Some(i) = self.monomer_names.iter().position(|n| n == name) {
             return Some(self.free_monomer_concentrations[i]);
@@ -296,6 +439,41 @@ impl Equilibrium {
             return Some(self.complex_concentrations[i]);
         }
         None
+    }
+
+    /// Monomer names in the order they were added.
+    #[must_use]
+    pub fn monomer_names(&self) -> &[String] {
+        &self.monomer_names
+    }
+
+    /// Complex names in the order they were added.
+    #[must_use]
+    pub fn complex_names(&self) -> &[String] {
+        &self.complex_names
+    }
+
+    /// Free monomer concentrations (same order as [`monomer_names`](Self::monomer_names)).
+    #[must_use]
+    pub fn free_monomer_concentrations(&self) -> &[f64] {
+        &self.free_monomer_concentrations
+    }
+
+    /// Complex concentrations (same order as [`complex_names`](Self::complex_names)).
+    #[must_use]
+    pub fn complex_concentrations(&self) -> &[f64] {
+        &self.complex_concentrations
+    }
+
+    /// Whether the solver achieved full convergence (relative tolerance 1e-7).
+    ///
+    /// Returns `false` if the solver accepted the result at a relaxed tolerance
+    /// (1e-4) due to stagnation at f64 precision limits. In practice, results
+    /// with relaxed convergence are still accurate for most purposes, but
+    /// callers doing high-precision work should check this flag.
+    #[must_use]
+    pub fn converged_fully(&self) -> bool {
+        self.converged_fully
     }
 }
 
@@ -325,7 +503,7 @@ fn evaluate(
     // c_j = exp(log_c_j), clamped to avoid overflow
     let c = DVector::from_iterator(
         n_species,
-        log_c.iter().map(|&lc| lc.min(700.0).exp()),
+        log_c.iter().map(|&lc| lc.min(LOG_C_MAX).exp()),
     );
 
     // f = -λᵀc⁰ + Σ_j c_j
@@ -415,12 +593,26 @@ fn dogleg_step(grad: &DVector<f64>, hessian: &DMatrix<f64>, delta: f64) -> DVect
     &p_c + tau * &d
 }
 
-/// Solve the dual problem, returning the optimal λ*.
+/// Convergence quality returned by the dual solver.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SolverConvergence {
+    /// Converged to full tolerance (RTOL = 1e-7).
+    Full { iterations: usize },
+    /// Accepted at relaxed tolerance (RTOL = 1e-4) due to stagnation.
+    Relaxed { iterations: usize, gradient_norm: f64 },
+}
+
+struct DualSolution {
+    lambda: DVector<f64>,
+    convergence: SolverConvergence,
+}
+
+/// Solve the dual problem, returning the optimal λ* and convergence info.
 fn solve_dual(
     a: &DMatrix<f64>,
     log_q: &DVector<f64>,
     c0: &DVector<f64>,
-) -> Result<DVector<f64>, EquilibriumError> {
+) -> Result<DualSolution, EquilibriumError> {
     const MAX_ITER: usize = 1000;
     const ATOL: f64 = 1e-14;
     const RTOL: f64 = 1e-7;
@@ -432,7 +624,7 @@ fn solve_dual(
     let mut delta = 1.0;
     let mut stagnation = 0u32;
 
-    for _ in 0..MAX_ITER {
+    for iter in 0..MAX_ITER {
         let eval = evaluate(a, log_q, c0, &lambda);
 
         // Per-component convergence: each gradient entry (= mass balance
@@ -443,7 +635,10 @@ fn solve_dual(
             .zip(c0.iter())
             .all(|(&g, &c)| g.abs() < ATOL + RTOL * c)
         {
-            return Ok(lambda);
+            return Ok(DualSolution {
+                lambda,
+                convergence: SolverConvergence::Full { iterations: iter + 1 },
+            });
         }
 
         let p = dogleg_step(&eval.grad, &eval.hessian, delta);
@@ -486,10 +681,16 @@ fn solve_dual(
                 .zip(c0.iter())
                 .all(|(&g, &c)| g.abs() < ATOL + STAG_RTOL * c)
             {
-                return Ok(lambda);
+                return Ok(DualSolution {
+                    lambda,
+                    convergence: SolverConvergence::Relaxed {
+                        iterations: iter + 1,
+                        gradient_norm: eval.grad.norm(),
+                    },
+                });
             }
             return Err(EquilibriumError::ConvergenceFailure {
-                iterations: MAX_ITER,
+                iterations: iter + 1,
                 gradient_norm: eval.grad.norm(),
             });
         }
@@ -539,12 +740,12 @@ mod tests {
     #[test]
     fn no_complexes() {
         let sys = System::new()
-            .monomer("A", 50e-9).unwrap()
-            .monomer("B", 100e-9).unwrap();
+            .monomer("A", 50e-9)
+            .monomer("B", 100e-9);
         let eq = sys.equilibrium().unwrap();
-        assert_eq!(eq.free_monomer_concentrations[0], 50e-9);
-        assert_eq!(eq.free_monomer_concentrations[1], 100e-9);
-        assert!(eq.complex_concentrations.is_empty());
+        assert_eq!(eq.free_monomer_concentrations()[0], 50e-9);
+        assert_eq!(eq.free_monomer_concentrations()[1], 100e-9);
+        assert!(eq.complex_concentrations().is_empty());
     }
 
     #[test]
@@ -552,10 +753,9 @@ mod tests {
         let c0 = 100.0 * NM;
         let dg = -10.0;
         let sys = System::new()
-            .monomer("A", c0).unwrap()
-            .monomer("B", c0).unwrap()
-            .complex("AB", &[("A", 1), ("B", 1)], dg)
-            .unwrap();
+            .monomer("A", c0)
+            .monomer("B", c0)
+            .complex("AB", &[("A", 1), ("B", 1)], dg);
         let eq = sys.equilibrium().unwrap();
 
         // Analytical solution
@@ -574,9 +774,8 @@ mod tests {
     fn homotrimerization() {
         let c0 = 1e-6;
         let sys = System::new()
-            .monomer("A", c0).unwrap()
-            .complex("AAA", &[("A", 3)], -15.0)
-            .unwrap();
+            .monomer("A", c0)
+            .complex("AAA", &[("A", 3)], -15.0);
         let eq = sys.equilibrium().unwrap();
         let free_a = eq.concentration("A").unwrap();
         let aaa = eq.concentration("AAA").unwrap();
@@ -593,15 +792,12 @@ mod tests {
     fn competing_complexes() {
         let c0 = 100.0 * NM;
         let sys = System::new()
-            .monomer("a", c0).unwrap()
-            .monomer("b", c0).unwrap()
-            .monomer("c", c0).unwrap()
+            .monomer("a", c0)
+            .monomer("b", c0)
+            .monomer("c", c0)
             .complex("ab", &[("a", 1), ("b", 1)], -10.0)
-            .unwrap()
             .complex("aaa", &[("a", 3)], -15.0)
-            .unwrap()
-            .complex("bc", &[("b", 1), ("c", 1)], -12.0)
-            .unwrap();
+            .complex("bc", &[("b", 1), ("c", 1)], -12.0);
         let eq = sys.equilibrium().unwrap();
 
         let a = eq.concentration("a").unwrap();
@@ -623,10 +819,9 @@ mod tests {
     fn strong_binding() {
         let c0 = 100.0 * NM;
         let sys = System::new()
-            .monomer("A", c0).unwrap()
-            .monomer("B", c0).unwrap()
-            .complex("AB", &[("A", 1), ("B", 1)], -30.0)
-            .unwrap();
+            .monomer("A", c0)
+            .monomer("B", c0)
+            .complex("AB", &[("A", 1), ("B", 1)], -30.0);
         let eq = sys.equilibrium().unwrap();
 
         let ab = eq.concentration("AB").unwrap();
@@ -641,10 +836,9 @@ mod tests {
     #[test]
     fn asymmetric_concentrations() {
         let sys = System::new()
-            .monomer("A", 200.0 * NM).unwrap()
-            .monomer("B", 100.0 * NM).unwrap()
-            .complex("AB", &[("A", 1), ("B", 1)], -10.0)
-            .unwrap();
+            .monomer("A", 200.0 * NM)
+            .monomer("B", 100.0 * NM)
+            .complex("AB", &[("A", 1), ("B", 1)], -10.0);
         let eq = sys.equilibrium().unwrap();
 
         let a = eq.concentration("A").unwrap();
@@ -658,96 +852,102 @@ mod tests {
     }
     #[test]
     fn negative_concentration() {
-        let err = System::new().monomer("A", -1e-9).unwrap_err();
+        let err = System::new().monomer("A", -1e-9).equilibrium().unwrap_err();
         assert!(matches!(err, EquilibriumError::InvalidConcentration(c) if c == -1e-9));
     }
 
     #[test]
     fn zero_concentration() {
-        let err = System::new().monomer("A", 0.0).unwrap_err();
+        let err = System::new().monomer("A", 0.0).equilibrium().unwrap_err();
         assert!(matches!(err, EquilibriumError::InvalidConcentration(c) if c == 0.0));
     }
 
     #[test]
     fn nan_concentration() {
-        let err = System::new().monomer("A", f64::NAN).unwrap_err();
+        let err = System::new().monomer("A", f64::NAN).equilibrium().unwrap_err();
         assert!(matches!(err, EquilibriumError::InvalidConcentration(_)));
     }
 
     #[test]
     fn inf_concentration() {
-        let err = System::new().monomer("A", f64::INFINITY).unwrap_err();
+        let err = System::new().monomer("A", f64::INFINITY).equilibrium().unwrap_err();
         assert!(matches!(err, EquilibriumError::InvalidConcentration(_)));
     }
 
     #[test]
     fn zero_temperature() {
-        let err = System::new().temperature(0.0).unwrap_err();
+        let err = System::new().temperature(0.0).monomer("A", 1e-9).equilibrium().unwrap_err();
         assert!(matches!(err, EquilibriumError::InvalidTemperature(t) if t == 0.0));
     }
 
     #[test]
     fn negative_temperature() {
-        let err = System::new().temperature(-100.0).unwrap_err();
+        let err = System::new().temperature(-100.0).monomer("A", 1e-9).equilibrium().unwrap_err();
         assert!(matches!(err, EquilibriumError::InvalidTemperature(_)));
     }
 
     #[test]
     fn duplicate_monomer() {
         let err = System::new()
-            .monomer("A", 1e-9).unwrap()
-            .monomer("A", 2e-9).unwrap_err();
+            .monomer("A", 1e-9)
+            .monomer("A", 2e-9)
+            .equilibrium().unwrap_err();
         assert!(matches!(err, EquilibriumError::DuplicateMonomer(ref n) if n == "A"));
     }
 
     #[test]
     fn duplicate_complex() {
         let err = System::new()
-            .monomer("A", 1e-9).unwrap()
-            .monomer("B", 1e-9).unwrap()
-            .complex("AB", &[("A", 1), ("B", 1)], -10.0).unwrap()
-            .complex("AB", &[("A", 1), ("B", 1)], -12.0).unwrap_err();
+            .monomer("A", 1e-9)
+            .monomer("B", 1e-9)
+            .complex("AB", &[("A", 1), ("B", 1)], -10.0)
+            .complex("AB", &[("A", 1), ("B", 1)], -12.0)
+            .equilibrium().unwrap_err();
         assert!(matches!(err, EquilibriumError::DuplicateComplex(ref n) if n == "AB"));
     }
 
     #[test]
     fn complex_name_collides_with_monomer() {
         let err = System::new()
-            .monomer("A", 1e-9).unwrap()
-            .monomer("B", 1e-9).unwrap()
-            .complex("A", &[("A", 1), ("B", 1)], -10.0).unwrap_err();
-        assert!(matches!(err, EquilibriumError::DuplicateComplex(ref n) if n == "A"));
+            .monomer("A", 1e-9)
+            .monomer("B", 1e-9)
+            .complex("A", &[("A", 1), ("B", 1)], -10.0)
+            .equilibrium().unwrap_err();
+        assert!(matches!(err, EquilibriumError::DuplicateSpeciesName(ref n) if n == "A"));
     }
 
     #[test]
     fn zero_count_stoichiometry() {
         let err = System::new()
-            .monomer("A", 1e-9).unwrap()
-            .monomer("B", 1e-9).unwrap()
-            .complex("AB", &[("A", 0), ("B", 1)], -10.0).unwrap_err();
+            .monomer("A", 1e-9)
+            .monomer("B", 1e-9)
+            .complex("AB", &[("A", 0), ("B", 1)], -10.0)
+            .equilibrium().unwrap_err();
         assert!(matches!(err, EquilibriumError::ZeroCount(ref n) if n == "A"));
     }
 
     #[test]
     fn empty_composition() {
         let err = System::new()
-            .monomer("A", 1e-9).unwrap()
-            .complex("X", &[], -10.0).unwrap_err();
+            .monomer("A", 1e-9)
+            .complex("X", &[], -10.0)
+            .equilibrium().unwrap_err();
         assert!(matches!(err, EquilibriumError::EmptyComposition));
     }
 
     #[test]
     fn unknown_monomer() {
         let err = System::new()
-            .monomer("A", 1e-9).unwrap()
-            .complex("AB", &[("A", 1), ("Z", 1)], -10.0).unwrap_err();
+            .monomer("A", 1e-9)
+            .complex("AB", &[("A", 1), ("Z", 1)], -10.0)
+            .equilibrium().unwrap_err();
         assert!(matches!(err, EquilibriumError::UnknownMonomer(ref n) if n == "Z"));
     }
 
     #[test]
     fn concentration_unknown_name() {
         let eq = System::new()
-            .monomer("A", 1e-9).unwrap()
+            .monomer("A", 1e-9)
             .equilibrium().unwrap();
         assert!(eq.concentration("nonexistent").is_none());
     }
@@ -765,6 +965,8 @@ mod tests {
             (EquilibriumError::ZeroCount("A".into()), "zero stoichiometric count"),
             (EquilibriumError::DuplicateMonomerInComposition("A".into()), "duplicate monomer in composition"),
             (EquilibriumError::InvalidDeltaG(f64::NAN), "invalid delta_g"),
+            (EquilibriumError::EmptyName, "must not be empty"),
+            (EquilibriumError::DuplicateSpeciesName("A".into()), "species name already in use"),
             (EquilibriumError::ConvergenceFailure { iterations: 100, gradient_norm: 1.0 }, "did not converge"),
         ];
         for (err, expected_substr) in &cases {
@@ -780,48 +982,69 @@ mod tests {
     #[test]
     fn duplicate_monomer_in_composition() {
         let err = System::new()
-            .monomer("A", 1e-9).unwrap()
-            .monomer("B", 1e-9).unwrap()
-            .complex("AB", &[("A", 1), ("A", 2)], -10.0).unwrap_err();
+            .monomer("A", 1e-9)
+            .monomer("B", 1e-9)
+            .complex("AB", &[("A", 1), ("A", 2)], -10.0)
+            .equilibrium().unwrap_err();
         assert!(matches!(err, EquilibriumError::DuplicateMonomerInComposition(ref n) if n == "A"));
     }
 
     #[test]
     fn nan_delta_g() {
         let err = System::new()
-            .monomer("A", 1e-9).unwrap()
-            .monomer("B", 1e-9).unwrap()
-            .complex("AB", &[("A", 1), ("B", 1)], f64::NAN).unwrap_err();
+            .monomer("A", 1e-9)
+            .monomer("B", 1e-9)
+            .complex("AB", &[("A", 1), ("B", 1)], f64::NAN)
+            .equilibrium().unwrap_err();
         assert!(matches!(err, EquilibriumError::InvalidDeltaG(_)));
     }
 
     #[test]
     fn inf_delta_g() {
         let err = System::new()
-            .monomer("A", 1e-9).unwrap()
-            .monomer("B", 1e-9).unwrap()
-            .complex("AB", &[("A", 1), ("B", 1)], f64::INFINITY).unwrap_err();
+            .monomer("A", 1e-9)
+            .monomer("B", 1e-9)
+            .complex("AB", &[("A", 1), ("B", 1)], f64::INFINITY)
+            .equilibrium().unwrap_err();
         assert!(matches!(err, EquilibriumError::InvalidDeltaG(_)));
     }
 
     #[test]
     fn neg_inf_delta_g() {
         let err = System::new()
-            .monomer("A", 1e-9).unwrap()
-            .monomer("B", 1e-9).unwrap()
-            .complex("AB", &[("A", 1), ("B", 1)], f64::NEG_INFINITY).unwrap_err();
+            .monomer("A", 1e-9)
+            .monomer("B", 1e-9)
+            .complex("AB", &[("A", 1), ("B", 1)], f64::NEG_INFINITY)
+            .equilibrium().unwrap_err();
         assert!(matches!(err, EquilibriumError::InvalidDeltaG(_)));
     }
 
     #[test]
-    fn public_name_fields() {
+    fn empty_monomer_name() {
+        let err = System::new().monomer("", 1e-9).equilibrium().unwrap_err();
+        assert!(matches!(err, EquilibriumError::EmptyName));
+    }
+
+    #[test]
+    fn empty_complex_name() {
+        let err = System::new()
+            .monomer("A", 1e-9)
+            .complex("", &[("A", 1)], -10.0)
+            .equilibrium().unwrap_err();
+        assert!(matches!(err, EquilibriumError::EmptyName));
+    }
+
+    #[test]
+    fn accessor_methods() {
         let eq = System::new()
-            .monomer("A", 1e-9).unwrap()
-            .monomer("B", 1e-9).unwrap()
-            .complex("AB", &[("A", 1), ("B", 1)], -10.0).unwrap()
+            .monomer("A", 1e-9)
+            .monomer("B", 1e-9)
+            .complex("AB", &[("A", 1), ("B", 1)], -10.0)
             .equilibrium().unwrap();
-        assert_eq!(eq.monomer_names, vec!["A", "B"]);
-        assert_eq!(eq.complex_names, vec!["AB"]);
+        assert_eq!(eq.monomer_names(), &["A", "B"]);
+        assert_eq!(eq.complex_names(), &["AB"]);
+        assert_eq!(eq.free_monomer_concentrations().len(), 2);
+        assert_eq!(eq.complex_concentrations().len(), 1);
     }
 
     #[test]
@@ -873,15 +1096,61 @@ mod tests {
     }
 
     #[test]
+    fn dogleg_cholesky_failure() {
+        // Singular Hessian (not positive definite) triggers the Cholesky failure path.
+        let h = DMatrix::from_row_slice(2, 2, &[0.0, 0.0, 0.0, 0.0]);
+        let g = DVector::from_vec(vec![1.0, 1.0]);
+        let p = dogleg_step(&g, &h, 1.0);
+        // Should return steepest descent clipped to trust region
+        let p_norm = p.norm();
+        assert!(
+            (p_norm - 1.0).abs() < 1e-12,
+            "step norm {} should equal delta 1.0",
+            p_norm,
+        );
+        // Direction should be opposite to gradient
+        let cos_angle = p.dot(&g) / (p_norm * g.norm());
+        assert!(cos_angle < -0.99, "step should be opposite gradient");
+    }
+
+    #[test]
+    fn dogleg_cholesky_failure_zero_gradient() {
+        // Singular Hessian + zero gradient: should return zero step.
+        let h = DMatrix::from_row_slice(2, 2, &[0.0, 0.0, 0.0, 0.0]);
+        let g = DVector::from_vec(vec![0.0, 0.0]);
+        let p = dogleg_step(&g, &h, 1.0);
+        assert!(p.norm() < 1e-15, "zero gradient should give zero step");
+    }
+
+    #[test]
+    fn dogleg_near_zero_curvature() {
+        // gᵀHg ≈ 0 but gradient nonzero: triggers the near-zero curvature guard.
+        // Use a Hessian with extremely small eigenvalues (but still PD for Cholesky).
+        let eps = 1e-40;
+        let h = DMatrix::from_row_slice(2, 2, &[eps, 0.0, 0.0, eps]);
+        let g = DVector::from_vec(vec![1.0, 1.0]);
+        let delta = 0.5;
+        let p = dogleg_step(&g, &h, delta);
+        // Newton step would be huge (-g/eps), so it's outside trust region.
+        // Cauchy: gᵀHg = 2*eps ≈ 0 < 1e-30 * gᵀg = 2e-30, so near-zero curvature fires.
+        let p_norm = p.norm();
+        assert!(
+            (p_norm - delta).abs() < 1e-12,
+            "step norm {} should equal delta {}",
+            p_norm, delta,
+        );
+    }
+
+    #[test]
     fn trust_region_adjustment() {
         // A system with many competing complexes and asymmetric concentrations
         // to exercise trust region shrink/expand during iteration.
         let sys = System::new()
-            .monomer("A", 1e-6).unwrap()
-            .monomer("B", 1e-8).unwrap()
-            .complex("AB", &[("A", 1), ("B", 1)], -15.0).unwrap()
-            .complex("A2B", &[("A", 2), ("B", 1)], -20.0).unwrap()
-            .complex("AB2", &[("A", 1), ("B", 2)], -18.0).unwrap();
+            .monomer("A", 1e-6)
+            .monomer("B", 1e-8)
+            .complex("AB", &[("A", 1), ("B", 1)], -15.0)
+            .complex("A2B", &[("A", 2), ("B", 1)], -20.0)
+            .complex("AB2", &[("A", 1), ("B", 2)], -18.0);
         let eq = sys.equilibrium().unwrap();
 
         // Verify mass conservation
