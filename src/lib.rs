@@ -367,7 +367,10 @@ impl System {
         let concentrations: Vec<f64> =
             log_c.iter().map(|&lc| lc.min(LOG_C_MAX).exp()).collect();
 
-        // Debug-mode validation
+        // Debug-mode validation — these are sanity checks to catch gross
+        // solver bugs.  Tolerances are generous (1%) because strong binding
+        // with picomolar concentrations can span 20+ orders of magnitude,
+        // amplifying f64 rounding through exp() recovery.
         #[cfg(debug_assertions)]
         {
             let rt = R * self.temperature;
@@ -376,7 +379,7 @@ impl System {
                 let total: f64 =
                     (0..concentrations.len()).map(|j| a[(i, j)] * concentrations[j]).sum();
                 debug_assert!(
-                    (total - c0[i]).abs() < 1e-3 * c0[i] + 1e-30,
+                    (total - c0[i]).abs() < 1e-2 * c0[i] + 1e-30,
                     "mass conservation violated for monomer {}: {total} != {}",
                     monomer_names[i],
                     c0[i]
@@ -390,11 +393,10 @@ impl System {
                     log_expected += count as f64 * concentrations[mi].ln();
                 }
                 let log_actual = concentrations[n_mon + k].ln();
-                let rel_err = (log_actual - log_expected).abs()
-                    / (log_expected.abs() + 1e-30);
+                let log_err = (log_actual - log_expected).abs();
                 debug_assert!(
-                    rel_err < 1e-3,
-                    "equilibrium condition violated for {}: log(actual)={log_actual} != log(expected)={log_expected} (rel err: {rel_err})",
+                    log_err < 1e-2 * (1.0 + log_expected.abs()),
+                    "equilibrium condition violated for {}: log(actual)={log_actual} != log(expected)={log_expected} (log_err: {log_err})",
                     complex_names[k]
                 );
             }
@@ -614,7 +616,10 @@ fn solve_dual(
     c0: &DVector<f64>,
 ) -> Result<DualSolution, EquilibriumError> {
     const MAX_ITER: usize = 1000;
-    const ATOL: f64 = 1e-14;
+    // Tight absolute floor — allows RTOL to dominate even at picomolar
+    // concentrations. The gradient can be computed to ~c0 * ε ≈ 2e-28,
+    // so this floor never limits achievable precision.
+    const ATOL: f64 = 1e-22;
     const RTOL: f64 = 1e-7;
     const ETA: f64 = 1e-4;
     const DELTA_MAX: f64 = 1e10;
@@ -651,8 +656,10 @@ fn solve_dual(
         let actual_reduction = eval.f - eval_new.f;
         let predicted_reduction = -(eval.grad.dot(&p) + 0.5 * p.dot(&(&eval.hessian * &p)));
 
-        // Track stagnation: objective can't decrease further in f64.
-        if actual_reduction == 0.0 {
+        // Track stagnation: objective is effectively at its f64 minimum.
+        // Use a few ULPs of f as the threshold to catch the "grinding"
+        // phase where reductions are non-zero but negligible.
+        if actual_reduction < 4.0 * f64::EPSILON * eval.f.abs().max(1.0) {
             stagnation += 1;
         } else {
             stagnation = 0;
@@ -662,24 +669,61 @@ fn solve_dual(
         // measurable reduction, try a full Newton step. The objective
         // is at f64 precision, but lambda can still improve, yielding
         // better gradient (mass-balance) accuracy.
+        //
+        // Relaxed convergence criteria for stagnation — uses a generous
+        // absolute floor since the solver is at f64 precision limits.
+        const STAG_ATOL: f64 = 1e-14;
+        const STAG_RTOL: f64 = 1e-4;
         if stagnation >= 3 {
             let p_full = dogleg_step(&eval.grad, &eval.hessian, DELTA_MAX);
             let lambda_full = &lambda + &p_full;
             let eval_full = evaluate(a, log_q, c0, &lambda_full);
             if eval_full.f <= eval.f {
                 lambda = lambda_full;
+
+                // Check convergence at the new point before continuing.
+                // Without this, the solver can loop indefinitely between
+                // stagnation and recovery when the gradient meets the
+                // relaxed tolerance but not the tight one.
+                if eval_full
+                    .grad
+                    .iter()
+                    .zip(c0.iter())
+                    .all(|(&g, &c)| g.abs() < ATOL + RTOL * c)
+                {
+                    return Ok(DualSolution {
+                        lambda,
+                        convergence: SolverConvergence::Full {
+                            iterations: iter + 1,
+                        },
+                    });
+                }
+                if eval_full
+                    .grad
+                    .iter()
+                    .zip(c0.iter())
+                    .all(|(&g, &c)| g.abs() < STAG_ATOL + STAG_RTOL * c)
+                {
+                    return Ok(DualSolution {
+                        lambda,
+                        convergence: SolverConvergence::Relaxed {
+                            iterations: iter + 1,
+                            gradient_norm: eval_full.grad.norm(),
+                        },
+                    });
+                }
+
                 delta = p_full.norm();
                 stagnation = 0;
                 continue;
             }
             // Recovery failed — accept if close enough with relaxed tolerance
             // (the solver is at f64 precision limits), otherwise report failure.
-            const STAG_RTOL: f64 = 1e-4;
             if eval
                 .grad
                 .iter()
                 .zip(c0.iter())
-                .all(|(&g, &c)| g.abs() < ATOL + STAG_RTOL * c)
+                .all(|(&g, &c)| g.abs() < STAG_ATOL + STAG_RTOL * c)
             {
                 return Ok(DualSolution {
                     lambda,

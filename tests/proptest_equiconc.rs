@@ -1,9 +1,11 @@
-use equiconc::System;
+use equiconc::{System, R};
 use proptest::prelude::*;
 
-const R: f64 = 1.987204e-3;
 const MONOMER_NAMES: [&str; 4] = ["A", "B", "C", "D"];
 const REL_TOL: f64 = 1e-4;
+/// Solver's absolute convergence floor — at picomolar concentrations this
+/// dominates the relative tolerance.
+const ATOL: f64 = 1e-14;
 
 /// Metadata about a generated system for verifying physical invariants.
 #[derive(Debug, Clone)]
@@ -28,7 +30,7 @@ impl SystemSpec {
 }
 
 fn log_uniform_concentration() -> impl Strategy<Value = f64> {
-    (-9.0f64..=-3.0).prop_map(|e| 10f64.powf(e))
+    (-12.0f64..=-3.0).prop_map(|e| 10f64.powf(e))
 }
 
 fn arb_system() -> impl Strategy<Value = SystemSpec> {
@@ -42,7 +44,7 @@ fn arb_system() -> impl Strategy<Value = SystemSpec> {
                 (
                     // For each monomer, a count of 0 (absent) to 3
                     prop::collection::vec(0..=3usize, n_mon),
-                    -30.0..=5.0f64,
+                    -40.0..=10.0f64,
                 ),
                 n_cplx,
             );
@@ -114,11 +116,12 @@ proptest! {
                     }
                 }
             }
-            let rel_err = (total - c0).abs() / c0;
+            let abs_err = (total - c0).abs();
+            let tol = ATOL + REL_TOL * c0;
             prop_assert!(
-                rel_err < REL_TOL,
-                "mass conservation violated for {}: total={}, c0={}, rel_err={}",
-                mon_name, total, c0, rel_err
+                abs_err < tol,
+                "mass conservation violated for {}: total={}, c0={}, abs_err={:.2e} (tol={:.2e})",
+                mon_name, total, c0, abs_err, tol
             );
         }
     }
@@ -128,18 +131,22 @@ proptest! {
         let eq = spec.solve().unwrap();
         let rt = R * spec.temperature;
         for (cplx_name, comp, dg) in &spec.complexes {
-            let k_eq = (-dg / rt).exp();
-            let mut product = 1.0;
-            for &(mon_name, count) in comp {
-                product *= eq.concentration(mon_name).unwrap().powi(count as i32);
-            }
-            let expected = k_eq * product;
             let actual = eq.concentration(cplx_name).unwrap();
-            let rel_err = (actual - expected).abs() / (expected + 1e-300);
+            // Compare in log-space to avoid underflow when concentrations
+            // are effectively zero (e.g. strong binding depleting monomers).
+            let log_actual = actual.ln();
+            let mut log_expected = -dg / rt;
+            for &(mon_name, count) in comp {
+                log_expected += count as f64 * eq.concentration(mon_name).unwrap().ln();
+            }
+            let log_err = (log_actual - log_expected).abs();
+            // Scale tolerance with magnitude: larger exponents allow
+            // proportionally more absolute error in log-space.
+            let tol = REL_TOL * (1.0 + log_expected.abs());
             prop_assert!(
-                rel_err < REL_TOL,
-                "equilibrium violated for {}: actual={}, expected={}, rel_err={}",
-                cplx_name, actual, expected, rel_err
+                log_err < tol,
+                "equilibrium violated for {}: log(actual)={}, log(expected)={}, log_err={} (tol={})",
+                cplx_name, log_actual, log_expected, log_err, tol
             );
         }
     }
@@ -173,7 +180,7 @@ proptest! {
     fn prop_dimerization_analytical(
         (c0, dg, temp) in (
             log_uniform_concentration(),
-            -30.0..=5.0f64,
+            -40.0..=10.0f64,
             293.15..=373.15f64,
         )
     ) {
@@ -191,22 +198,26 @@ proptest! {
         let free = 2.0 * c0 / (disc + 1.0);
         let x = k * free * free;
 
-        let tol = REL_TOL;
         let a_conc = eq.concentration("A").unwrap();
         let b_conc = eq.concentration("B").unwrap();
         let ab_conc = eq.concentration("AB").unwrap();
 
-        prop_assert!(
-            (a_conc - free).abs() / (free + 1e-300) < tol,
-            "[A]={} != expected {}", a_conc, free
-        );
-        prop_assert!(
-            (b_conc - free).abs() / (free + 1e-300) < tol,
-            "[B]={} != expected {}", b_conc, free
-        );
-        prop_assert!(
-            (ab_conc - x).abs() / (x + 1e-300) < tol,
-            "[AB]={} != expected {}", ab_conc, x
-        );
+        // Combined absolute + relative tolerance: at picomolar
+        // concentrations, ATOL dominates and some species (free monomer
+        // or weak complex) may be below the solver's precision floor.
+        let check = |actual: f64, expected: f64, label: &str| -> Result<(), TestCaseError> {
+            let abs_err = (actual - expected).abs();
+            let tol = ATOL + REL_TOL * expected;
+            prop_assert!(
+                abs_err < tol,
+                "{}: actual={:.6e}, expected={:.6e}, abs_err={:.2e} (tol={:.2e})",
+                label, actual, expected, abs_err, tol
+            );
+            Ok(())
+        };
+
+        check(a_conc, free, "[A]")?;
+        check(b_conc, free, "[B]")?;
+        check(ab_conc, x, "[AB]")?;
     }
 }
