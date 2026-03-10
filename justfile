@@ -15,7 +15,7 @@ coverage-python:
     export VIRTUAL_ENV="{{ venv }}"
     source <(cargo llvm-cov show-env --export-prefix)
     cargo llvm-cov clean --workspace
-    maturin develop
+    uv run maturin develop
     {{ venv }}/bin/pytest tests/test_equiconc.py -v
     cargo llvm-cov report
 
@@ -27,7 +27,7 @@ coverage:
     source <(cargo llvm-cov show-env --export-prefix)
     cargo llvm-cov clean --workspace
     cargo test
-    maturin develop
+    uv run maturin develop
     {{ venv }}/bin/pytest tests/test_equiconc.py -v
     cargo llvm-cov report
 
@@ -39,7 +39,7 @@ coverage-lcov:
     source <(cargo llvm-cov show-env --export-prefix)
     cargo llvm-cov clean --workspace
     cargo test
-    maturin develop
+    uv run maturin develop
     {{ venv }}/bin/pytest tests/test_equiconc.py -v
     cargo llvm-cov report --lcov --output-path lcov.info
 
