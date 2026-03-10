@@ -31,25 +31,63 @@ enum EnergySpec {
     DeltaHS { delta_h: f64, delta_s: f64 },
 }
 
+/// Accepts either a plain float or a (value, temperature_C) tuple from Python.
+#[derive(Debug, Clone, FromPyObject)]
+enum DeltaGInput {
+    Scalar(f64),
+    AtTemp((f64, f64)),
+}
+
 fn resolve_energy_spec(
-    delta_g: Option<f64>,
+    delta_g: Option<DeltaGInput>,
     delta_g_over_rt: Option<f64>,
     delta_h: Option<f64>,
     delta_s: Option<f64>,
 ) -> PyResult<EnergySpec> {
-    match (delta_g, delta_g_over_rt, delta_h, delta_s) {
-        (Some(dg), None, None, None) => Ok(EnergySpec::DeltaG(dg)),
-        (None, Some(dgrt), None, None) => Ok(EnergySpec::DeltaGOverRT(dgrt)),
-        (None, None, Some(dh), Some(ds)) => Ok(EnergySpec::DeltaHS {
+    // Split delta_g into its two forms for cleaner matching.
+    let (dg_scalar, dg_at_temp) = match delta_g {
+        Some(DeltaGInput::Scalar(v)) => (Some(v), None),
+        Some(DeltaGInput::AtTemp(pair)) => (None, Some(pair)),
+        None => (None, None),
+    };
+
+    match (dg_scalar, dg_at_temp, delta_g_over_rt, delta_h, delta_s) {
+        // delta_g=<float>
+        (Some(dg), None, None, None, None) => Ok(EnergySpec::DeltaG(dg)),
+        // delta_g_over_rt=<float>
+        (None, None, Some(dgrt), None, None) => Ok(EnergySpec::DeltaGOverRT(dgrt)),
+        // delta_h=<float>, delta_s=<float>
+        (None, None, None, Some(dh), Some(ds)) => Ok(EnergySpec::DeltaHS {
             delta_h: dh,
             delta_s: ds,
         }),
-        (None, None, Some(_), None) | (None, None, None, Some(_)) => Err(
+        // delta_g=(<float>, <temp_C>), delta_s=<float>  →  derive ΔH
+        (None, Some((dg, temp_c)), None, None, Some(ds)) => {
+            let temp_k = temp_c + 273.15;
+            let dh = dg + temp_k * ds;
+            Ok(EnergySpec::DeltaHS {
+                delta_h: dh,
+                delta_s: ds,
+            })
+        }
+        // delta_g=(<float>, <temp_C>) without delta_s
+        (None, Some(_), None, None, None) => Err(PyValueError::new_err(
+            "delta_g as (value, temperature_C) requires delta_s",
+        )),
+        // delta_g=<float> with delta_s but no delta_h
+        (Some(_), None, None, None, Some(_)) => Err(PyValueError::new_err(
+            "delta_g as a scalar cannot be combined with delta_s; \
+             use delta_g=(value, temperature_C) tuple form, or delta_h + delta_s",
+        )),
+        // delta_h without delta_s, or vice versa
+        (None, None, None, Some(_), None) | (None, None, None, None, Some(_)) => Err(
             PyValueError::new_err("delta_h and delta_s must both be specified"),
         ),
-        (None, None, None, None) => Err(PyValueError::new_err(
+        // Nothing specified
+        (None, None, None, None, None) => Err(PyValueError::new_err(
             "must specify energy: delta_g, delta_g_over_rt, or (delta_h and delta_s)",
         )),
+        // Conflicting specifications
         _ => Err(PyValueError::new_err(
             "specify only one of: delta_g, delta_g_over_rt, or (delta_h and delta_s)",
         )),
@@ -138,6 +176,10 @@ impl PySystem {
     /// Exactly one energy specification must be provided:
     ///
     /// - ``delta_g``: standard free energy of formation in kcal/mol
+    /// - ``delta_g=(value, temperature_C)`` + ``delta_s``: ΔG at a
+    ///   known temperature plus ΔS; ΔH is derived as
+    ///   ΔH = ΔG + T·ΔS and ΔG at the system temperature is
+    ///   computed as ΔH − T_sys·ΔS
     /// - ``delta_g_over_rt``: dimensionless ΔG/RT (no temperature needed)
     /// - ``delta_h`` + ``delta_s``: enthalpy (kcal/mol) and entropy
     ///   (kcal/(mol·K)); ΔG is computed as ΔH − TΔS at solve time
@@ -150,9 +192,11 @@ impl PySystem {
     ///     Monomer composition as ``[(monomer_name, count), ...]``.
     ///     Each monomer must have been previously added and count
     ///     must be >= 1.
-    /// delta_g : float, optional
+    /// delta_g : float or (float, float), optional
     ///     Standard free energy of formation in kcal/mol at 1 M
-    ///     standard state. Must be finite.
+    ///     standard state. Either a scalar (must be finite), or a
+    ///     tuple ``(delta_g, temperature_C)`` giving ΔG at a known
+    ///     temperature in °C; the latter form requires ``delta_s``.
     /// delta_g_over_rt : float, optional
     ///     Dimensionless free energy ΔG/(RT). When all complexes use
     ///     this form, temperature is not required.
@@ -161,7 +205,7 @@ impl PySystem {
     ///     ``delta_s``.
     /// delta_s : float, optional
     ///     Entropy of formation in kcal/(mol·K). Must be paired with
-    ///     ``delta_h``.
+    ///     ``delta_h``, or with the tuple form of ``delta_g``.
     ///
     /// Returns
     /// -------
@@ -173,7 +217,7 @@ impl PySystem {
         py: Python<'_>,
         name: &str,
         composition: Vec<(String, usize)>,
-        delta_g: Option<f64>,
+        delta_g: Option<DeltaGInput>,
         delta_g_over_rt: Option<f64>,
         delta_h: Option<f64>,
         delta_s: Option<f64>,

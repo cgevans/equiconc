@@ -460,3 +460,91 @@ def test_multiple_energy_specs_error():
         equiconc.System().monomer("A", 1e-9).complex(
             "AB", [("A", 1)], delta_g=-10.0, delta_g_over_rt=-16.0
         )
+
+
+# ---------------------------------------------------------------------------
+# delta_g tuple form tests
+# ---------------------------------------------------------------------------
+
+
+def test_delta_g_tuple_matches_delta_h_delta_s():
+    """delta_g=(dg, temp_C) + delta_s should give same result as delta_h + delta_s."""
+    c0 = 100e-9
+    temp_k = 310.15  # system temperature
+    delta_s = -0.13  # kcal/(mol·K)
+
+    # Known ΔG at 25 °C
+    ref_temp_c = 25.0
+    ref_temp_k = ref_temp_c + 273.15
+    delta_h = -50.0
+    dg_at_ref = delta_h - ref_temp_k * delta_s
+
+    eq_tuple = (
+        equiconc.System(temperature_K=temp_k)
+        .monomer("A", c0)
+        .monomer("B", c0)
+        .complex(
+            "AB",
+            [("A", 1), ("B", 1)],
+            delta_g=(dg_at_ref, ref_temp_c),
+            delta_s=delta_s,
+        )
+        .equilibrium()
+    )
+    eq_hs = (
+        equiconc.System(temperature_K=temp_k)
+        .monomer("A", c0)
+        .monomer("B", c0)
+        .complex(
+            "AB",
+            [("A", 1), ("B", 1)],
+            delta_h=delta_h,
+            delta_s=delta_s,
+        )
+        .equilibrium()
+    )
+    assert eq_tuple["AB"] == pytest.approx(eq_hs["AB"], rel=1e-10)
+    assert eq_tuple["A"] == pytest.approx(eq_hs["A"], rel=1e-10)
+
+
+def test_delta_g_tuple_same_temp_matches_scalar():
+    """delta_g=(dg, T) at system temperature should match delta_g=dg."""
+    c0 = 100e-9
+    dg = -10.0
+    temp_c = 37.0
+
+    eq_scalar = (
+        equiconc.System(temperature_C=temp_c)
+        .monomer("A", c0)
+        .monomer("B", c0)
+        .complex("AB", [("A", 1), ("B", 1)], delta_g=dg)
+        .equilibrium()
+    )
+    # With delta_s=0 and same reference temperature, result should match scalar form.
+    eq_tuple = (
+        equiconc.System(temperature_C=temp_c)
+        .monomer("A", c0)
+        .monomer("B", c0)
+        .complex(
+            "AB",
+            [("A", 1), ("B", 1)],
+            delta_g=(dg, temp_c),
+            delta_s=0.0,
+        )
+        .equilibrium()
+    )
+    assert eq_scalar["AB"] == pytest.approx(eq_tuple["AB"], rel=1e-10)
+
+
+def test_delta_g_tuple_without_delta_s_error():
+    with pytest.raises(ValueError, match="requires delta_s"):
+        equiconc.System().monomer("A", 1e-9).complex(
+            "AB", [("A", 1)], delta_g=(-10.0, 25.0)
+        )
+
+
+def test_delta_g_scalar_with_delta_s_error():
+    with pytest.raises(ValueError, match="cannot be combined with delta_s"):
+        equiconc.System().monomer("A", 1e-9).complex(
+            "AB", [("A", 1)], delta_g=-10.0, delta_s=-0.13
+        )
