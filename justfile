@@ -43,6 +43,18 @@ coverage-lcov:
     {{ venv }}/bin/pytest tests/test_equiconc.py -v
     cargo llvm-cov report --lcov --output-path lcov.info
 
+# Combined coverage with Cobertura XML output
+coverage-xml:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export VIRTUAL_ENV="{{ venv }}"
+    source <(cargo llvm-cov show-env --export-prefix)
+    cargo llvm-cov clean --workspace
+    cargo test
+    uv run maturin develop
+    {{ venv }}/bin/pytest tests/test_equiconc.py -v
+    cargo llvm-cov report --cobertura --output-path coverage.xml
+
 # Combined coverage with HTML report in target/coverage/
 coverage-html:
     #!/usr/bin/env bash

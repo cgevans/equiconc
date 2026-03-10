@@ -21,12 +21,12 @@ jobs:
       - uses: extractions/setup-just@v2
 
       - run: uv sync --dev --no-install-project # special version will be installed by coverage-lcov
-      - run: just coverage-lcov
-      - name: Fix absolute paths in lcov.info
-        run: sed -i "s|$PWD/||g" lcov.info
+      - run: just coverage-xml
+      - name: Fix absolute paths in coverage.xml
+        run: sed -i "s|$PWD/||g" coverage.xml
 
       - uses: codecov/codecov-action@v4
         with:
-          files: lcov.info
+          files: coverage.xml
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true
