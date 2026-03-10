@@ -20,7 +20,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - uses: extractions/setup-just@v2
 
-      - run: uv sync
+      - run: uv sync --dev
       - run: just coverage-lcov
 
       - uses: codecov/codecov-action@v5
