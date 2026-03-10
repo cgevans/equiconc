@@ -22,7 +22,7 @@ def system_strategy(draw):
     n_mon = draw(st.integers(min_value=1, max_value=4))
 
     monomers = {}
-    sys = equiconc.System(temperature=temperature)
+    sys = equiconc.System(temperature_K=temperature)
     for i in range(n_mon):
         name = MONOMER_NAMES[i]
         conc = draw(_log_uniform_concentration())
@@ -55,7 +55,7 @@ def monomer_only_strategy(draw):
     n_mon = draw(st.integers(min_value=1, max_value=4))
 
     monomers = {}
-    sys = equiconc.System(temperature=temperature)
+    sys = equiconc.System(temperature_K=temperature)
     for i in range(n_mon):
         name = MONOMER_NAMES[i]
         conc = draw(_log_uniform_concentration())
@@ -144,7 +144,7 @@ def test_prop_monomer_only_identity(data):
 def test_prop_dimerization_analytical(data):
     c0, dg, temp = data
     sys = (
-        equiconc.System(temperature=temp)
+        equiconc.System(temperature_K=temp)
         .monomer("A", c0)
         .monomer("B", c0)
         .complex("AB", [("A", 1), ("B", 1)], delta_g=dg)
