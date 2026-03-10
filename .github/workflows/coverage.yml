@@ -22,6 +22,8 @@ jobs:
 
       - run: uv sync --dev --no-install-project # special version will be installed by coverage-lcov
       - run: just coverage-lcov
+      - name: Fix absolute paths in lcov.info
+        run: sed -i "s|$PWD/||g" lcov.info
 
       - uses: codecov/codecov-action@v5
         with:
