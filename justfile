@@ -59,12 +59,8 @@ coverage-open:
 coverage-serve: coverage-html
     python3 -m http.server 8000 -d target/coverage/html
 
-# Build Python extension into venv
-develop:
-    uv run maturin develop --release
-
 # Pre-execute notebooks and convert to markdown
-docs-notebooks: develop
+docs-notebooks: 
     {{ venv }}/bin/jupyter nbconvert --to markdown --execute \
         --output-dir docs/notebooks/ \
         docs/notebooks/quickstart.ipynb \
