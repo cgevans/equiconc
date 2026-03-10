@@ -1,0 +1,2 @@
+[rust-analyzer]
+features = ["python"]

@@ -18,6 +18,10 @@ cargo check
 maturin develop --release              # build Python wheel into .venv
 .venv/bin/pytest tests/test_equiconc.py -v   # all Python tests
 .venv/bin/pytest tests/test_equiconc.py -v -k test_name   # single test
+
+# Documentation (requires uv sync --group docs)
+just docs              # pre-execute notebooks + build with zensical
+just docs-serve        # pre-execute notebooks + serve with live reload
 ```
 
 ## Coverage
@@ -50,7 +54,12 @@ Debug-mode assertions verify mass conservation and equilibrium conditions post-s
 
 ### Python bindings (`src/python.rs`)
 
-Gated behind the `python` Cargo feature. `PySystem` mirrors the Rust builder; `PyEquilibrium` provides dict-like access (`eq["AB"]`, `"AB" in eq`) plus `to_dict()` and property getters.
+Gated behind the `python` Cargo feature. `PySystem` wraps the Rust builder with a Pythonic API; `PyEquilibrium` provides dict-like access (`eq["AB"]`, `"AB" in eq`) plus `to_dict()` and property getters.
+
+Python API differences from Rust:
+- Temperature defaults to 25 °C; set via `temperature_C=` or `temperature_K=` keyword args
+- Complex energy can be specified as `delta_g` (kcal/mol), `delta_g_over_rt` (unitless ΔG/RT), or `delta_h`+`delta_s` (kcal/mol and kcal/(mol·K))
+- Energy args are keyword-only on `complex()`
 
 Python uses `uv` for management.  Do not use `pip`, and prefer things like `uv add` over `uv pip install`, including using dependency groups, unless absolutely necessary.
 

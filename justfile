@@ -58,3 +58,22 @@ coverage-open:
 # Serve the HTML coverage report on localhost:8000
 coverage-serve: coverage-html
     python3 -m http.server 8000 -d target/coverage/html
+
+# Build Python extension into venv
+develop:
+    uv run maturin develop --release
+
+# Pre-execute notebooks and convert to markdown
+docs-notebooks: develop
+    {{ venv }}/bin/jupyter nbconvert --to markdown --execute \
+        --output-dir docs/notebooks/ \
+        docs/notebooks/quickstart.ipynb \
+        docs/notebooks/competitive_binding.ipynb
+
+# Build documentation
+docs: docs-notebooks
+    {{ venv }}/bin/zensical build
+
+# Serve documentation with live reload
+docs-serve: docs-notebooks
+    {{ venv }}/bin/zensical serve

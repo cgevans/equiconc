@@ -18,64 +18,219 @@ fn map_err(e: EquilibriumError) -> PyErr {
 }
 
 // ---------------------------------------------------------------------------
+// Energy specification for complexes
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+enum EnergySpec {
+    /// ΔG in kcal/mol
+    DeltaG(f64),
+    /// ΔG/RT (unitless)
+    DeltaGOverRT(f64),
+    /// ΔH (kcal/mol) and ΔS (kcal/(mol·K))
+    DeltaHS { delta_h: f64, delta_s: f64 },
+}
+
+fn resolve_energy_spec(
+    delta_g: Option<f64>,
+    delta_g_over_rt: Option<f64>,
+    delta_h: Option<f64>,
+    delta_s: Option<f64>,
+) -> PyResult<EnergySpec> {
+    match (delta_g, delta_g_over_rt, delta_h, delta_s) {
+        (Some(dg), None, None, None) => Ok(EnergySpec::DeltaG(dg)),
+        (None, Some(dgrt), None, None) => Ok(EnergySpec::DeltaGOverRT(dgrt)),
+        (None, None, Some(dh), Some(ds)) => Ok(EnergySpec::DeltaHS {
+            delta_h: dh,
+            delta_s: ds,
+        }),
+        (None, None, Some(_), None) | (None, None, None, Some(_)) => Err(
+            PyValueError::new_err("delta_h and delta_s must both be specified"),
+        ),
+        (None, None, None, None) => Err(PyValueError::new_err(
+            "must specify energy: delta_g, delta_g_over_rt, or (delta_h and delta_s)",
+        )),
+        _ => Err(PyValueError::new_err(
+            "specify only one of: delta_g, delta_g_over_rt, or (delta_h and delta_s)",
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PySystem — deferred-construction wrapper
 // ---------------------------------------------------------------------------
 
-/// Equilibrium concentration solver.
+/// Equilibrium concentration solver for nucleic acid strand systems.
 ///
-/// Build a system by chaining `.monomer()` and `.complex()` calls, then
-/// call `.equilibrium()` to solve.
+/// Build a system by chaining ``monomer()`` and ``complex()`` calls,
+/// then call ``equilibrium()`` to solve for equilibrium concentrations.
+///
+/// Parameters
+/// ----------
+/// temperature_C : float, optional
+///     Temperature in degrees Celsius (default: 25.0).
+/// temperature_K : float, optional
+///     Temperature in kelvin. Cannot be combined with ``temperature_C``.
+///
+/// Examples
+/// --------
+/// >>> import equiconc
+/// >>> eq = (equiconc.System()
+/// ...     .monomer("A", 100e-9)
+/// ...     .monomer("B", 100e-9)
+/// ...     .complex("AB", [("A", 1), ("B", 1)], delta_g=-10.0)
+/// ...     .equilibrium())
+/// >>> eq["AB"] > 0
+/// True
 #[pyclass(name = "System", module = "equiconc")]
 struct PySystem {
-    inner: crate::System,
+    temperature_k: Option<f64>,
+    monomers: Vec<(String, f64)>,
+    complexes: Vec<(String, Vec<(String, usize)>, EnergySpec)>,
 }
 
 #[pymethods]
+#[allow(non_snake_case)]
 impl PySystem {
     #[new]
-    #[pyo3(signature = (temperature = 310.15))]
-    fn new(temperature: f64) -> Self {
-        PySystem {
-            inner: crate::System::new().temperature(temperature),
-        }
+    #[pyo3(signature = (*, temperature_C=None, temperature_K=None))]
+    fn new(temperature_C: Option<f64>, temperature_K: Option<f64>) -> PyResult<Self> {
+        let temp_k = match (temperature_C, temperature_K) {
+            (None, None) => None,
+            (Some(c), None) => Some(c + 273.15),
+            (None, Some(k)) => Some(k),
+            (Some(_), Some(_)) => {
+                return Err(PyValueError::new_err(
+                    "cannot specify both temperature_C and temperature_K",
+                ))
+            }
+        };
+        Ok(PySystem {
+            temperature_k: temp_k,
+            monomers: Vec::new(),
+            complexes: Vec::new(),
+        })
     }
 
-    /// Add a monomer species with a given total concentration (molar).
+    /// Add a monomer species with a given total concentration.
+    ///
+    /// Parameters
+    /// ----------
+    /// name : str
+    ///     Name of the monomer species. Must be unique and non-empty.
+    /// total_concentration : float
+    ///     Total concentration in molar (mol/L). Must be finite and
+    ///     positive.
+    ///
+    /// Returns
+    /// -------
+    /// System
+    ///     The same system instance, for method chaining.
     fn monomer(slf: Py<Self>, py: Python<'_>, name: &str, total_concentration: f64) -> Py<Self> {
         let mut inner = slf.borrow_mut(py);
-        inner.inner = inner.inner.clone().monomer(name, total_concentration);
+        inner.monomers.push((name.to_string(), total_concentration));
         drop(inner);
         slf
     }
 
-    /// Add a complex with composition `[(monomer_name, count), ...]` and ΔG° (kcal/mol).
+    /// Add a complex species with a given stoichiometry and energy.
+    ///
+    /// Exactly one energy specification must be provided:
+    ///
+    /// - ``delta_g``: standard free energy of formation in kcal/mol
+    /// - ``delta_g_over_rt``: dimensionless ΔG/RT (no temperature needed)
+    /// - ``delta_h`` + ``delta_s``: enthalpy (kcal/mol) and entropy
+    ///   (kcal/(mol·K)); ΔG is computed as ΔH − TΔS at solve time
+    ///
+    /// Parameters
+    /// ----------
+    /// name : str
+    ///     Name of the complex. Must be unique across all species.
+    /// composition : list of (str, int)
+    ///     Monomer composition as ``[(monomer_name, count), ...]``.
+    ///     Each monomer must have been previously added and count
+    ///     must be >= 1.
+    /// delta_g : float, optional
+    ///     Standard free energy of formation in kcal/mol at 1 M
+    ///     standard state. Must be finite.
+    /// delta_g_over_rt : float, optional
+    ///     Dimensionless free energy ΔG/(RT). When all complexes use
+    ///     this form, temperature is not required.
+    /// delta_h : float, optional
+    ///     Enthalpy of formation in kcal/mol. Must be paired with
+    ///     ``delta_s``.
+    /// delta_s : float, optional
+    ///     Entropy of formation in kcal/(mol·K). Must be paired with
+    ///     ``delta_h``.
+    ///
+    /// Returns
+    /// -------
+    /// System
+    ///     The same system instance, for method chaining.
+    #[pyo3(signature = (name, composition, *, delta_g=None, delta_g_over_rt=None, delta_h=None, delta_s=None))]
     fn complex(
         slf: Py<Self>,
         py: Python<'_>,
         name: &str,
         composition: Vec<(String, usize)>,
-        delta_g: f64,
-    ) -> Py<Self> {
-        let comp_refs: Vec<(&str, usize)> =
-            composition.iter().map(|(n, c)| (n.as_str(), *c)).collect();
+        delta_g: Option<f64>,
+        delta_g_over_rt: Option<f64>,
+        delta_h: Option<f64>,
+        delta_s: Option<f64>,
+    ) -> PyResult<Py<Self>> {
+        let energy = resolve_energy_spec(delta_g, delta_g_over_rt, delta_h, delta_s)?;
         let mut inner = slf.borrow_mut(py);
-        inner.inner = inner.inner.clone().complex(name, &comp_refs, delta_g);
+        inner.complexes.push((name.to_string(), composition, energy));
         drop(inner);
-        slf
+        Ok(slf)
     }
 
     /// Solve for equilibrium concentrations.
+    ///
+    /// Returns
+    /// -------
+    /// Equilibrium
+    ///     The result containing concentrations of all species.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If the system specification is invalid (no monomers, unknown
+    ///     monomers in complexes, invalid concentrations, etc.).
+    /// RuntimeError
+    ///     If the solver fails to converge.
     fn equilibrium(&self) -> PyResult<PyEquilibrium> {
-        let eq = self.inner.equilibrium().map_err(map_err)?;
+        // Default to 25 °C if no temperature was given.
+        let temp_k = self.temperature_k.unwrap_or(298.15);
+
+        let mut sys = crate::System::new().temperature(temp_k);
+
+        for (name, conc) in &self.monomers {
+            sys = sys.monomer(name, *conc);
+        }
+
+        let rt = crate::R * temp_k;
+        for (name, comp, energy) in &self.complexes {
+            let dg = match energy {
+                EnergySpec::DeltaG(dg) => *dg,
+                EnergySpec::DeltaGOverRT(dgrt) => *dgrt * rt,
+                EnergySpec::DeltaHS { delta_h, delta_s } => *delta_h - temp_k * *delta_s,
+            };
+            let comp_refs: Vec<(&str, usize)> =
+                comp.iter().map(|(n, c)| (n.as_str(), *c)).collect();
+            sys = sys.complex(name, &comp_refs, dg);
+        }
+
+        let eq = sys.equilibrium().map_err(map_err)?;
         Ok(PyEquilibrium::from_equilibrium(eq))
     }
 
     fn __repr__(&self) -> String {
+        let temp_c = self.temperature_k.unwrap_or(298.15) - 273.15;
         format!(
-            "System(temperature={}, monomers={}, complexes={})",
-            self.inner.get_temperature(),
-            self.inner.monomer_count(),
-            self.inner.complex_count()
+            "System(temperature={temp_c:.2}°C, monomers={}, complexes={})",
+            self.monomers.len(),
+            self.complexes.len()
         )
     }
 }
@@ -84,9 +239,24 @@ impl PySystem {
 // PyEquilibrium — wraps the result with Pythonic access
 // ---------------------------------------------------------------------------
 
-/// Result of an equilibrium calculation.
+/// Result of an equilibrium concentration calculation.
 ///
-/// Supports dict-like access: `eq["A"]`, `"A" in eq`, `len(eq)`.
+/// Supports dict-like access: ``eq["A"]``, ``"A" in eq``, ``len(eq)``,
+/// and iteration over species names with ``for name in eq``.
+///
+/// Attributes
+/// ----------
+/// monomer_names : list of str
+///     Monomer species names, in addition order.
+/// complex_names : list of str
+///     Complex species names, in addition order.
+/// free_monomer_concentrations : list of float
+///     Free monomer concentrations in molar, in addition order.
+/// complex_concentrations : list of float
+///     Complex concentrations in molar, in addition order.
+/// converged_fully : bool
+///     Whether the solver achieved full convergence. ``False`` if the
+///     solver accepted results at a relaxed tolerance.
 #[pyclass(name = "Equilibrium", module = "equiconc")]
 struct PyEquilibrium {
     concentrations: HashMap<String, f64>,
@@ -125,7 +295,17 @@ impl PyEquilibrium {
 
 #[pymethods]
 impl PyEquilibrium {
-    /// Look up a concentration by species name. Returns `None` if unknown.
+    /// Look up a concentration by species name.
+    ///
+    /// Parameters
+    /// ----------
+    /// name : str
+    ///     Species name (monomer or complex).
+    ///
+    /// Returns
+    /// -------
+    /// float or None
+    ///     Concentration in molar, or ``None`` if not found.
     fn concentration(&self, name: &str) -> Option<f64> {
         self.concentrations.get(name).copied()
     }
@@ -148,8 +328,13 @@ impl PyEquilibrium {
         self.concentrations.len()
     }
 
-    /// All species as a Python dict `{name: concentration}` in deterministic
-    /// order (monomers first, then complexes, in addition order).
+    /// Convert to a dict mapping species names to concentrations.
+    ///
+    /// Returns
+    /// -------
+    /// dict
+    ///     ``{name: concentration}`` in deterministic order (monomers
+    ///     first, then complexes, in addition order).
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let dict = PyDict::new(py);
         for name in self.ordered_names() {
@@ -158,17 +343,32 @@ impl PyEquilibrium {
         Ok(dict)
     }
 
-    /// Species names in deterministic order (monomers first, then complexes).
+    /// Species names in deterministic order.
+    ///
+    /// Returns
+    /// -------
+    /// list of str
+    ///     Names in order: monomers first, then complexes.
     fn keys(&self) -> Vec<String> {
         self.ordered_names().cloned().collect()
     }
 
-    /// Concentrations in deterministic order (monomers first, then complexes).
+    /// Concentrations in deterministic order.
+    ///
+    /// Returns
+    /// -------
+    /// list of float
+    ///     Concentrations in molar, monomers first, then complexes.
     fn values(&self) -> Vec<f64> {
         self.ordered_names().map(|n| self.concentrations[n]).collect()
     }
 
-    /// `(name, concentration)` pairs in deterministic order.
+    /// ``(name, concentration)`` pairs in deterministic order.
+    ///
+    /// Returns
+    /// -------
+    /// list of (str, float)
+    ///     Pairs in order: monomers first, then complexes.
     fn items(&self) -> Vec<(String, f64)> {
         self.ordered_names()
             .map(|n| (n.clone(), self.concentrations[n]))

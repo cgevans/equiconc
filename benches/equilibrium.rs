@@ -9,7 +9,7 @@ fn all_pairs_system(n: usize) -> System {
     let names: Vec<String> = (0..n).map(|i| format!("S{i}")).collect();
 
     for name in &names {
-        sys = sys.monomer(name, 100.0 * NM).unwrap();
+        sys = sys.monomer(name, 100.0 * NM);
     }
 
     let mut dg = -9.0;
@@ -18,7 +18,7 @@ fn all_pairs_system(n: usize) -> System {
             let cname = format!("{}{}", names[i], names[j]);
             sys = sys
                 .complex(&cname, &[(&names[i], 1), (&names[j], 1)], dg)
-                .unwrap();
+                ;
             dg -= 0.1; // vary ΔG slightly so each dimer is distinct
         }
     }
@@ -42,10 +42,9 @@ fn bench_binding_strength(c: &mut Criterion) {
     let mut group = c.benchmark_group("binding_strength");
     for dg in [-1.0, -10.0, -25.0] {
         let sys = System::new()
-            .monomer("A", 100.0 * NM).unwrap()
-            .monomer("B", 100.0 * NM).unwrap()
-            .complex("AB", &[("A", 1), ("B", 1)], dg)
-            .unwrap();
+            .monomer("A", 100.0 * NM)
+            .monomer("B", 100.0 * NM)
+            .complex("AB", &[("A", 1), ("B", 1)], dg);
         group.bench_with_input(
             BenchmarkId::new("dG", format!("{dg:.0}")),
             &sys,
@@ -59,19 +58,17 @@ fn bench_stoichiometry(c: &mut Criterion) {
     let mut group = c.benchmark_group("stoichiometry");
 
     let ab = System::new()
-        .monomer("A", 100.0 * NM).unwrap()
-        .monomer("B", 100.0 * NM).unwrap()
-        .complex("AB", &[("A", 1), ("B", 1)], -10.0)
-        .unwrap();
+        .monomer("A", 100.0 * NM)
+        .monomer("B", 100.0 * NM)
+        .complex("AB", &[("A", 1), ("B", 1)], -10.0);
     group.bench_with_input(BenchmarkId::new("complex", "1:1"), &ab, |b, sys| {
         b.iter(|| sys.equilibrium().unwrap())
     });
 
     let a2b3 = System::new()
-        .monomer("A", 500.0 * NM).unwrap()
-        .monomer("B", 500.0 * NM).unwrap()
-        .complex("A2B3", &[("A", 2), ("B", 3)], -20.0)
-        .unwrap();
+        .monomer("A", 500.0 * NM)
+        .monomer("B", 500.0 * NM)
+        .complex("A2B3", &[("A", 2), ("B", 3)], -20.0);
     group.bench_with_input(BenchmarkId::new("complex", "2:3"), &a2b3, |b, sys| {
         b.iter(|| sys.equilibrium().unwrap())
     });
@@ -81,8 +78,8 @@ fn bench_stoichiometry(c: &mut Criterion) {
 
 fn bench_no_complexes(c: &mut Criterion) {
     let sys = System::new()
-        .monomer("A", 100.0 * NM).unwrap()
-        .monomer("B", 100.0 * NM).unwrap();
+        .monomer("A", 100.0 * NM)
+        .monomer("B", 100.0 * NM);
     c.bench_function("no_complexes", |b| {
         b.iter(|| sys.equilibrium().unwrap())
     });

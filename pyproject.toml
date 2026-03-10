@@ -20,3 +20,8 @@ dev = [
     "pytest>=9.0",
     "pytest-cov>=6.0",
 ]
+docs = [
+    "zensical>=0.0.24",
+    "mkdocstrings[python]>=0.24",
+    "nbconvert>=7.0",
+]

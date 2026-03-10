@@ -9,3 +9,7 @@ dist/
 *.profdata
 htmlcov/
 .coverage
+site/
+docs/notebooks/*.md
+docs/notebooks/*_files/
+.hypothesis/
