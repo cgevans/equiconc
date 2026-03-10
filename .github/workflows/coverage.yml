@@ -24,9 +24,8 @@ jobs:
       - run: just coverage-xml
       - name: Fix absolute paths in coverage.xml
         run: sed -i "s|$PWD/||g" coverage.xml
-
-      - uses: codecov/codecov-action@v4
-        with:
-          files: coverage.xml
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: true
+      - name: Upload coverage to Codecov
+        run: |
+          curl -Os https://uploader.codecov.io/latest/linux/codecov
+          chmod +x codecov
+          ./codecov -f coverage.xml -t ${{ secrets.CODECOV_TOKEN }} -v
