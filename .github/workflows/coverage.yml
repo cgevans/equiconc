@@ -25,12 +25,8 @@ jobs:
       - name: Fix absolute paths in lcov.info
         run: sed -i "s|$PWD/||g" lcov.info
 
-      - name: Verify lcov.info paths
-        run: head -5 lcov.info
-      - uses: codecov/codecov-action@v5
+      - uses: codecov/codecov-action@v4
         with:
           files: lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
-          verbose: true
           fail_ci_if_error: true
-          disable_search: true
