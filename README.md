@@ -1,4 +1,5 @@
 [![Documentation](https://img.shields.io/badge/docs-cgevans.github.io%2Fequiconc-blue)](https://cgevans.github.io/equiconc)
+[![codecov](https://codecov.io/gh/cgevans/equiconc/branch/main/graph/badge.svg)](https://codecov.io/gh/cgevans/equiconc)
 
 Equiconc is an equilibrium concentration solver for monomer/complex systems (like networks of interactions of DNA/RNA strands),
 _when the complexes are already enumerated and standard free energies of binding are known_.  It implements the convex optimization
