@@ -6,7 +6,7 @@ _when the complexes are already enumerated and standard free energies of binding
 method of [Dirks et al. (2007)](https://doi.org/10.1137/060651100), without any other portions of the paper; as such, it can be
 applied generally, for example, to find equilibrium concentrations in tile assembly systems.
 
-The library is written in Rust, with a Python interface that is inteneded to be easily usable.
+The library is written in Rust, with a Python interface that is intended to be easily usable.
 
 ## Quick example
 
