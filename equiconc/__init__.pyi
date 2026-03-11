@@ -19,7 +19,7 @@ class System:
     >>> eq = (equiconc.System()
     ...     .monomer("A", 100e-9)
     ...     .monomer("B", 100e-9)
-    ...     .complex("AB", [("A", 1), ("B", 1)], dg_s=-10.0)
+    ...     .complex("AB", [("A", 1), ("B", 1)], dg_st=-10.0)
     ...     .equilibrium())
     >>> eq["AB"] > 0
     True
@@ -54,7 +54,7 @@ class System:
         name: str,
         composition: list[tuple[str, int]],
         *,
-        dg_s: float,
+        dg_st: float,
     ) -> System: ...
     @overload
     def complex(
@@ -62,8 +62,8 @@ class System:
         name: str,
         composition: list[tuple[str, int]],
         *,
-        dg_s: tuple[float, float],
-        ds_s: float,
+        dg_st: tuple[float, float],
+        ds_st: float,
     ) -> System: ...
     @overload
     def complex(
@@ -79,29 +79,29 @@ class System:
         name: str,
         composition: list[tuple[str, int]],
         *,
-        dh_s: float,
-        ds_s: float,
+        dh_st: float,
+        ds_st: float,
     ) -> System: ...
     def complex(
         self,
         name: str,
         composition: list[tuple[str, int]],
         *,
-        dg_s: float | tuple[float, float] | None = None,
+        dg_st: float | tuple[float, float] | None = None,
         delta_g_over_rt: float | None = None,
-        dh_s: float | None = None,
-        ds_s: float | None = None,
+        dh_st: float | None = None,
+        ds_st: float | None = None,
     ) -> System:
         """Add a complex species with a given stoichiometry and energy.
 
         Exactly one energy specification must be provided:
 
-        - ``dg_s``: standard free energy of formation in kcal/mol
-        - ``dg_s=(value, temperature_C)`` + ``ds_s``: |DeltaG| at a
+        - ``dg_st``: standard free energy of formation in kcal/mol
+        - ``dg_st=(value, temperature_C)`` + ``ds_st``: |DeltaG| at a
           known temperature plus |DeltaS|; |DeltaH| is derived as
           |DeltaH| = |DeltaG| + T |cdot| |DeltaS|
         - ``delta_g_over_rt``: dimensionless |DeltaG|/RT
-        - ``dh_s`` + ``ds_s``: enthalpy (kcal/mol) and entropy
+        - ``dh_st`` + ``ds_st``: enthalpy (kcal/mol) and entropy
           (kcal/(mol |cdot| K))
 
         Parameters
@@ -110,14 +110,14 @@ class System:
             Name of the complex. Must be unique across all species.
         composition : list of (str, int)
             Monomer composition as ``[(monomer_name, count), ...]``.
-        dg_s : float or (float, float), optional
+        dg_st : float or (float, float), optional
             Standard free energy of formation in kcal/mol, or a
-            ``(dg_s, temperature_C)`` tuple requiring ``ds_s``.
+            ``(dg_st, temperature_C)`` tuple requiring ``ds_st``.
         delta_g_over_rt : float, optional
             Dimensionless free energy |DeltaG|/(RT).
-        dh_s : float, optional
-            Enthalpy of formation in kcal/mol. Must be paired with ``ds_s``.
-        ds_s : float, optional
+        dh_st : float, optional
+            Enthalpy of formation in kcal/mol. Must be paired with ``ds_st``.
+        ds_st : float, optional
             Entropy of formation in kcal/(mol |cdot| K).
 
         Returns

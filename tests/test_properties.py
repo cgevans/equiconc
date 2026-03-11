@@ -42,7 +42,7 @@ def system_strategy(draw):
         if not comp:
             comp = {MONOMER_NAMES[0]: 1}
         delta_g = draw(st.floats(min_value=-30.0, max_value=5.0))
-        sys = sys.complex(cplx_name, list(comp.items()), dg_s=delta_g)
+        sys = sys.complex(cplx_name, list(comp.items()), dg_st=delta_g)
         complexes[cplx_name] = (comp, delta_g)
 
     return sys, temperature, monomers, complexes
@@ -147,7 +147,7 @@ def test_prop_dimerization_analytical(data):
         equiconc.System(temperature_K=temp)
         .monomer("A", c0)
         .monomer("B", c0)
-        .complex("AB", [("A", 1), ("B", 1)], dg_s=dg)
+        .complex("AB", [("A", 1), ("B", 1)], dg_st=dg)
     )
     eq = sys.equilibrium()
 

@@ -62,7 +62,7 @@ Gated behind the `python` Cargo feature. `PySystem` wraps the Rust builder with 
 
 Python API differences from Rust:
 - Temperature defaults to 25 °C; set via `temperature_C=` or `temperature_K=` keyword args
-- Complex energy can be specified as `dg_s` (kcal/mol), `delta_g_over_rt` (unitless ΔG/RT), or `dh_s`+`ds_s` (kcal/mol and kcal/(mol·K))
+- Complex energy can be specified as `dg_st` (kcal/mol), `delta_g_over_rt` (unitless ΔG/RT), or `dh_st`+`ds_st` (kcal/mol and kcal/(mol·K))
 - Energy args are keyword-only on `complex()`
 
 Python uses `uv` for management.  Do not use `pip`, and prefer things like `uv add` over `uv pip install`, including using dependency groups, unless absolutely necessary.
