@@ -16,6 +16,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
@@ -26,9 +28,7 @@ jobs:
       - run: uv sync --dev --no-install-project # special version will be installed by coverage-lcov
       - run: just coverage-python-full
       - run: just coverage-rust
-      - uses: codecov/codecov-action@v5
+      - uses: coverallsapp/github-action@v2
         with:
-          files: coverage-rust-from-python.lcov,coverage-python.xml,coverage-rust.lcov
-          name: general-run
-          token: ${{ secrets.CODECOV_TOKEN }}
-          slug: cgevans/equiconc
+          files: coverage-rust-from-python.lcov coverage-python.xml coverage-rust.lcov
+          github-token: ${{ secrets.GITHUB_TOKEN }}
