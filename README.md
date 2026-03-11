@@ -18,7 +18,7 @@ eq = (
     equiconc.System()
     .monomer("A", 100e-9)       # 100 nM
     .monomer("B", 100e-9)
-    .complex("AB", [("A", 1), ("B", 1)], dg_s=-10.0)
+    .complex("AB", [("A", 1), ("B", 1)], dg_st=-10.0)
     .equilibrium()
 )
 
