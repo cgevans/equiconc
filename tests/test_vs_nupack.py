@@ -74,7 +74,7 @@ def _equiconc(strand_concs, complexes, T=310.15):
     for name, c0 in strand_concs.items():
         sys = sys.monomer(name, c0)
     for name, composition, dg in complexes:
-        sys = sys.complex(name, composition, delta_g=dg)
+        sys = sys.complex(name, composition, dg_s=dg)
     eq = sys.equilibrium()
     return eq.to_dict()
 

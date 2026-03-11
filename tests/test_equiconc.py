@@ -24,7 +24,7 @@ def test_simple_dimerization():
         equiconc.System()
         .monomer("A", c0)
         .monomer("B", c0)
-        .complex("AB", [("A", 1), ("B", 1)], delta_g=dg)
+        .complex("AB", [("A", 1), ("B", 1)], dg_s=dg)
     )
     eq = sys.equilibrium()
 
@@ -43,7 +43,8 @@ def test_concentration_method():
     sys = equiconc.System().monomer("A", 50e-9)
     eq = sys.equilibrium()
     assert eq.concentration("A") == pytest.approx(50e-9)
-    assert eq.concentration("nonexistent") is None
+    with pytest.raises(KeyError):
+        eq.concentration("nonexistent")
 
 
 def test_contains():
@@ -66,7 +67,7 @@ def test_to_dict():
         equiconc.System()
         .monomer("A", c0)
         .monomer("B", c0)
-        .complex("AB", [("A", 1), ("B", 1)], delta_g=-10.0)
+        .complex("AB", [("A", 1), ("B", 1)], dg_s=-10.0)
     )
     eq = sys.equilibrium()
     d = eq.to_dict()
@@ -81,7 +82,7 @@ def test_getters():
         equiconc.System()
         .monomer("A", c0)
         .monomer("B", c0)
-        .complex("AB", [("A", 1), ("B", 1)], delta_g=-10.0)
+        .complex("AB", [("A", 1), ("B", 1)], dg_s=-10.0)
     )
     eq = sys.equilibrium()
     assert eq.monomer_names == ["A", "B"]
@@ -97,13 +98,13 @@ def test_no_monomers_error():
 
 
 def test_unknown_monomer_error():
-    sys = equiconc.System().monomer("A", 50e-9).complex("AB", [("A", 1), ("B", 1)], delta_g=-10.0)
+    sys = equiconc.System().monomer("A", 50e-9).complex("AB", [("A", 1), ("B", 1)], dg_s=-10.0)
     with pytest.raises(ValueError, match="unknown monomer"):
         sys.equilibrium()
 
 
 def test_empty_composition_error():
-    sys = equiconc.System().monomer("A", 50e-9).complex("X", [], delta_g=-10.0)
+    sys = equiconc.System().monomer("A", 50e-9).complex("X", [], dg_s=-10.0)
     with pytest.raises(ValueError, match="empty composition"):
         sys.equilibrium()
 
@@ -159,8 +160,8 @@ def test_duplicate_complex_error():
             equiconc.System()
             .monomer("A", 1e-9)
             .monomer("B", 1e-9)
-            .complex("AB", [("A", 1), ("B", 1)], delta_g=-10.0)
-            .complex("AB", [("A", 1), ("B", 1)], delta_g=-12.0)
+            .complex("AB", [("A", 1), ("B", 1)], dg_s=-10.0)
+            .complex("AB", [("A", 1), ("B", 1)], dg_s=-12.0)
             .equilibrium()
         )
 
@@ -171,7 +172,7 @@ def test_zero_count_error():
             equiconc.System()
             .monomer("A", 1e-9)
             .monomer("B", 1e-9)
-            .complex("AB", [("A", 0), ("B", 1)], delta_g=-10.0)
+            .complex("AB", [("A", 0), ("B", 1)], dg_s=-10.0)
             .equilibrium()
         )
 
@@ -182,7 +183,7 @@ def test_duplicate_monomer_in_composition_error():
             equiconc.System()
             .monomer("A", 1e-9)
             .monomer("B", 1e-9)
-            .complex("AB", [("A", 1), ("A", 2)], delta_g=-10.0)
+            .complex("AB", [("A", 1), ("A", 2)], dg_s=-10.0)
             .equilibrium()
         )
 
@@ -193,7 +194,7 @@ def test_nan_delta_g_error():
             equiconc.System()
             .monomer("A", 1e-9)
             .monomer("B", 1e-9)
-            .complex("AB", [("A", 1), ("B", 1)], delta_g=float("nan"))
+            .complex("AB", [("A", 1), ("B", 1)], dg_s=float("nan"))
             .equilibrium()
         )
 
@@ -204,7 +205,7 @@ def test_inf_delta_g_error():
             equiconc.System()
             .monomer("A", 1e-9)
             .monomer("B", 1e-9)
-            .complex("AB", [("A", 1), ("B", 1)], delta_g=float("inf"))
+            .complex("AB", [("A", 1), ("B", 1)], dg_s=float("inf"))
             .equilibrium()
         )
 
@@ -214,7 +215,7 @@ def test_iter():
         equiconc.System()
         .monomer("A", 50e-9)
         .monomer("B", 100e-9)
-        .complex("AB", [("A", 1), ("B", 1)], delta_g=-10.0)
+        .complex("AB", [("A", 1), ("B", 1)], dg_s=-10.0)
     )
     eq = sys.equilibrium()
     names = list(eq)
@@ -226,7 +227,7 @@ def test_keys_values_items():
         equiconc.System()
         .monomer("A", 50e-9)
         .monomer("B", 100e-9)
-        .complex("AB", [("A", 1), ("B", 1)], delta_g=-10.0)
+        .complex("AB", [("A", 1), ("B", 1)], dg_s=-10.0)
     )
     eq = sys.equilibrium()
     assert eq.keys() == ["A", "B", "AB"]
@@ -244,7 +245,7 @@ def test_to_dict_order():
         equiconc.System()
         .monomer("A", 50e-9)
         .monomer("B", 100e-9)
-        .complex("AB", [("A", 1), ("B", 1)], delta_g=-10.0)
+        .complex("AB", [("A", 1), ("B", 1)], dg_s=-10.0)
     )
     eq = sys.equilibrium()
     d = eq.to_dict()
@@ -264,7 +265,7 @@ def test_empty_monomer_name_error():
 
 def test_empty_complex_name_error():
     with pytest.raises(ValueError, match="must not be empty"):
-        equiconc.System().monomer("A", 1e-9).complex("", [("A", 1)], delta_g=-10.0).equilibrium()
+        equiconc.System().monomer("A", 1e-9).complex("", [("A", 1)], dg_s=-10.0).equilibrium()
 
 
 def test_complex_name_collides_with_monomer():
@@ -273,7 +274,7 @@ def test_complex_name_collides_with_monomer():
             equiconc.System()
             .monomer("A", 1e-9)
             .monomer("B", 1e-9)
-            .complex("A", [("A", 1), ("B", 1)], delta_g=-10.0)
+            .complex("A", [("A", 1), ("B", 1)], dg_s=-10.0)
             .equilibrium()
         )
 
@@ -288,8 +289,8 @@ def test_default_temperature_is_25C():
     sys = equiconc.System().monomer("A", 100e-9).monomer("B", 100e-9)
     # Using explicit 25 °C should give identical results
     sys_explicit = equiconc.System(temperature_C=25.0).monomer("A", 100e-9).monomer("B", 100e-9)
-    eq = sys.complex("AB", [("A", 1), ("B", 1)], delta_g=-10.0).equilibrium()
-    eq_explicit = sys_explicit.complex("AB", [("A", 1), ("B", 1)], delta_g=-10.0).equilibrium()
+    eq = sys.complex("AB", [("A", 1), ("B", 1)], dg_s=-10.0).equilibrium()
+    eq_explicit = sys_explicit.complex("AB", [("A", 1), ("B", 1)], dg_s=-10.0).equilibrium()
     assert eq["AB"] == pytest.approx(eq_explicit["AB"])
 
 
@@ -301,14 +302,14 @@ def test_temperature_C_converts_correctly():
         equiconc.System(temperature_C=25.0)
         .monomer("A", c0)
         .monomer("B", c0)
-        .complex("AB", [("A", 1), ("B", 1)], delta_g=dg)
+        .complex("AB", [("A", 1), ("B", 1)], dg_s=dg)
         .equilibrium()
     )
     eq_k = (
         equiconc.System(temperature_K=298.15)
         .monomer("A", c0)
         .monomer("B", c0)
-        .complex("AB", [("A", 1), ("B", 1)], delta_g=dg)
+        .complex("AB", [("A", 1), ("B", 1)], dg_s=dg)
         .equilibrium()
     )
     assert eq_c["AB"] == pytest.approx(eq_k["AB"])
@@ -325,8 +326,8 @@ def test_both_temperatures_error():
 # ---------------------------------------------------------------------------
 
 
-def test_delta_g_over_rt_matches_delta_g():
-    """delta_g_over_rt should give same result as equivalent delta_g."""
+def test_delta_g_over_rt_matches_dg_s():
+    """delta_g_over_rt should give same result as equivalent dg_s."""
     c0 = 100e-9
     dg = -10.0
     temp_k = 310.15
@@ -336,7 +337,7 @@ def test_delta_g_over_rt_matches_delta_g():
         equiconc.System(temperature_K=temp_k)
         .monomer("A", c0)
         .monomer("B", c0)
-        .complex("AB", [("A", 1), ("B", 1)], delta_g=dg)
+        .complex("AB", [("A", 1), ("B", 1)], dg_s=dg)
         .equilibrium()
     )
     eq_dgrt = (
@@ -376,12 +377,12 @@ def test_delta_g_over_rt_no_temperature():
 
 
 # ---------------------------------------------------------------------------
-# delta_h / delta_s tests
+# dh_s / ds_s tests
 # ---------------------------------------------------------------------------
 
 
-def test_delta_h_delta_s_matches_delta_g():
-    """ΔG = ΔH − TΔS should give same result as explicit delta_g."""
+def test_dh_s_ds_s_matches_dg_s():
+    """ΔG = ΔH − TΔS should give same result as explicit dg_s."""
     c0 = 100e-9
     temp_k = 310.15
     delta_h = -50.0  # kcal/mol
@@ -392,21 +393,21 @@ def test_delta_h_delta_s_matches_delta_g():
         equiconc.System(temperature_K=temp_k)
         .monomer("A", c0)
         .monomer("B", c0)
-        .complex("AB", [("A", 1), ("B", 1)], delta_g=dg)
+        .complex("AB", [("A", 1), ("B", 1)], dg_s=dg)
         .equilibrium()
     )
     eq_hs = (
         equiconc.System(temperature_K=temp_k)
         .monomer("A", c0)
         .monomer("B", c0)
-        .complex("AB", [("A", 1), ("B", 1)], delta_h=delta_h, delta_s=delta_s)
+        .complex("AB", [("A", 1), ("B", 1)], dh_s=delta_h, ds_s=delta_s)
         .equilibrium()
     )
     assert eq_dg["AB"] == pytest.approx(eq_hs["AB"], rel=1e-10)
     assert eq_dg["A"] == pytest.approx(eq_hs["A"], rel=1e-10)
 
 
-def test_delta_h_delta_s_temperature_dependence():
+def test_dh_s_ds_s_temperature_dependence():
     """Changing temperature should change equilibrium when using ΔH/ΔS."""
     c0 = 100e-9
     delta_h = -50.0
@@ -416,14 +417,14 @@ def test_delta_h_delta_s_temperature_dependence():
         equiconc.System(temperature_C=25.0)
         .monomer("A", c0)
         .monomer("B", c0)
-        .complex("AB", [("A", 1), ("B", 1)], delta_h=delta_h, delta_s=delta_s)
+        .complex("AB", [("A", 1), ("B", 1)], dh_s=delta_h, ds_s=delta_s)
         .equilibrium()
     )
     eq_50 = (
         equiconc.System(temperature_C=50.0)
         .monomer("A", c0)
         .monomer("B", c0)
-        .complex("AB", [("A", 1), ("B", 1)], delta_h=delta_h, delta_s=delta_s)
+        .complex("AB", [("A", 1), ("B", 1)], dh_s=delta_h, ds_s=delta_s)
         .equilibrium()
     )
     # Higher temperature should shift equilibrium (with these values,
@@ -441,34 +442,34 @@ def test_no_energy_spec_error():
         equiconc.System().monomer("A", 1e-9).complex("AB", [("A", 1)])
 
 
-def test_delta_h_without_delta_s_error():
-    with pytest.raises(ValueError, match="delta_h and delta_s must both"):
+def test_dh_s_without_ds_s_error():
+    with pytest.raises(ValueError, match="dh_s and ds_s must both"):
         equiconc.System().monomer("A", 1e-9).complex(
-            "AB", [("A", 1)], delta_h=-50.0
+            "AB", [("A", 1)], dh_s=-50.0
         )
 
 
-def test_delta_s_without_delta_h_error():
-    with pytest.raises(ValueError, match="delta_h and delta_s must both"):
+def test_ds_s_without_dh_s_error():
+    with pytest.raises(ValueError, match="dh_s and ds_s must both"):
         equiconc.System().monomer("A", 1e-9).complex(
-            "AB", [("A", 1)], delta_s=-0.13
+            "AB", [("A", 1)], ds_s=-0.13
         )
 
 
 def test_multiple_energy_specs_error():
     with pytest.raises(ValueError, match="specify only one"):
         equiconc.System().monomer("A", 1e-9).complex(
-            "AB", [("A", 1)], delta_g=-10.0, delta_g_over_rt=-16.0
+            "AB", [("A", 1)], dg_s=-10.0, delta_g_over_rt=-16.0
         )
 
 
 # ---------------------------------------------------------------------------
-# delta_g tuple form tests
+# dg_s tuple form tests
 # ---------------------------------------------------------------------------
 
 
-def test_delta_g_tuple_matches_delta_h_delta_s():
-    """delta_g=(dg, temp_C) + delta_s should give same result as delta_h + delta_s."""
+def test_dg_s_tuple_matches_dh_s_ds_s():
+    """dg_s=(dg, temp_C) + ds_s should give same result as dh_s + ds_s."""
     c0 = 100e-9
     temp_k = 310.15  # system temperature
     delta_s = -0.13  # kcal/(mol·K)
@@ -486,8 +487,8 @@ def test_delta_g_tuple_matches_delta_h_delta_s():
         .complex(
             "AB",
             [("A", 1), ("B", 1)],
-            delta_g=(dg_at_ref, ref_temp_c),
-            delta_s=delta_s,
+            dg_s=(dg_at_ref, ref_temp_c),
+            ds_s=delta_s,
         )
         .equilibrium()
     )
@@ -498,8 +499,8 @@ def test_delta_g_tuple_matches_delta_h_delta_s():
         .complex(
             "AB",
             [("A", 1), ("B", 1)],
-            delta_h=delta_h,
-            delta_s=delta_s,
+            dh_s=delta_h,
+            ds_s=delta_s,
         )
         .equilibrium()
     )
@@ -507,8 +508,8 @@ def test_delta_g_tuple_matches_delta_h_delta_s():
     assert eq_tuple["A"] == pytest.approx(eq_hs["A"], rel=1e-10)
 
 
-def test_delta_g_tuple_same_temp_matches_scalar():
-    """delta_g=(dg, T) at system temperature should match delta_g=dg."""
+def test_dg_s_tuple_same_temp_matches_scalar():
+    """dg_s=(dg, T) at system temperature should match dg_s=dg."""
     c0 = 100e-9
     dg = -10.0
     temp_c = 37.0
@@ -517,10 +518,10 @@ def test_delta_g_tuple_same_temp_matches_scalar():
         equiconc.System(temperature_C=temp_c)
         .monomer("A", c0)
         .monomer("B", c0)
-        .complex("AB", [("A", 1), ("B", 1)], delta_g=dg)
+        .complex("AB", [("A", 1), ("B", 1)], dg_s=dg)
         .equilibrium()
     )
-    # With delta_s=0 and same reference temperature, result should match scalar form.
+    # With ds_s=0 and same reference temperature, result should match scalar dg_s.
     eq_tuple = (
         equiconc.System(temperature_C=temp_c)
         .monomer("A", c0)
@@ -528,23 +529,23 @@ def test_delta_g_tuple_same_temp_matches_scalar():
         .complex(
             "AB",
             [("A", 1), ("B", 1)],
-            delta_g=(dg, temp_c),
-            delta_s=0.0,
+            dg_s=(dg, temp_c),
+            ds_s=0.0,
         )
         .equilibrium()
     )
     assert eq_scalar["AB"] == pytest.approx(eq_tuple["AB"], rel=1e-10)
 
 
-def test_delta_g_tuple_without_delta_s_error():
-    with pytest.raises(ValueError, match="requires delta_s"):
+def test_dg_s_tuple_without_ds_s_error():
+    with pytest.raises(ValueError, match="requires ds_s"):
         equiconc.System().monomer("A", 1e-9).complex(
-            "AB", [("A", 1)], delta_g=(-10.0, 25.0)
+            "AB", [("A", 1)], dg_s=(-10.0, 25.0)
         )
 
 
-def test_delta_g_scalar_with_delta_s_error():
-    with pytest.raises(ValueError, match="cannot be combined with delta_s"):
+def test_dg_s_scalar_with_ds_s_error():
+    with pytest.raises(ValueError, match="cannot be combined with ds_s"):
         equiconc.System().monomer("A", 1e-9).complex(
-            "AB", [("A", 1)], delta_g=-10.0, delta_s=-0.13
+            "AB", [("A", 1)], dg_s=-10.0, ds_s=-0.13
         )
