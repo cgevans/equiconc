@@ -31,3 +31,4 @@ jobs:
           files: coverage-rust-from-python.lcov,coverage-python.xml,coverage-rust.lcov
           name: general-run
           token: ${{ secrets.CODECOV_TOKEN }}
+          slug: cgevans/equiconc
