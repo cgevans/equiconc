@@ -28,7 +28,7 @@ jobs:
           python-version: "3.12"
       - name: Set up Rust cache
         uses: Swatinem/rust-cache@v2
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
       - name: Install cargo-llvm-cov
@@ -283,9 +283,9 @@ jobs:
           VERSION="${TAG#v}"
           NOTES=$(awk -v ver="$VERSION" '
             BEGIN { found=0 }
-            /^## Version / {
+            /^## \[/ {
               if (found) exit
-              header=$0; sub(/^## Version /, "", header)
+              header=$0; sub(/^## \[/, "", header); sub(/\].*/, "", header)
               if (header == ver) found=1
               next
             }
@@ -314,6 +314,6 @@ jobs:
       - name: Set up Rust cache
         uses: Swatinem/rust-cache@v2
       - name: Publish to crates.io
-        run: cargo publish --allow-dirty -p qslib
+        run: cargo publish -p equiconc
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}

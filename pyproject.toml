@@ -6,6 +6,23 @@ build-backend = "maturin"
 name = "equiconc"
 version = "0.1.0"
 requires-python = ">=3.10"
+description = "Equilibrium concentration solver"
+license = "BSD-3-Clause"
+authors = [{ name = "Constantine Evans", email = "equiconc@mb.costi.net" }]
+readme = "README.md"
+keywords = ["equilibrium", "nucleic-acid", "thermodynamics", "DNA", "RNA"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+]
+
+[project.urls]
+Repository = "https://github.com/cgevans/equiconc"
+Documentation = "https://cgevans.github.io/equiconc"
 
 [tool.maturin]
 features = ["python"]
