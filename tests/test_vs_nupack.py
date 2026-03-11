@@ -191,7 +191,7 @@ class TestStrongBinding:
 
 
 class TestCustomTemperature:
-    """Non-default temperature (25 °C = 298.15 K)."""
+    """Explicit temperature matching the default (25 °C = 298.15 K)."""
 
     def test_vs_nupack(self):
         strands = {"A": 100 * NM, "B": 100 * NM}

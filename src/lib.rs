@@ -25,7 +25,7 @@
 //! ```
 //! use equiconc::System;
 //!
-//! // A + B ⇌ AB with ΔG° = -10 kcal/mol at 37 °C
+//! // A + B ⇌ AB with ΔG° = -10 kcal/mol at 25 °C (default)
 //! let eq = System::new()
 //!     .monomer("A", 100e-9)      // 100 nM
 //!     .monomer("B", 100e-9)
@@ -135,13 +135,13 @@ impl Default for System {
 }
 
 impl System {
-    /// Create an empty system at 37 °C (310.15 K).
+    /// Create an empty system at 25 °C (298.15 K).
     #[must_use]
     pub fn new() -> Self {
         System {
             monomers: Vec::new(),
             complexes: Vec::new(),
-            temperature: 310.15,
+            temperature: 298.15,
         }
     }
 
@@ -803,7 +803,7 @@ mod tests {
         let eq = sys.equilibrium().unwrap();
 
         // Analytical solution
-        let rt = R * 310.15;
+        let rt = R * 298.15;
         let k = (-dg / rt).exp();
         // K(c₀ − x)² = x  ⟹  Kx² − (2Kc₀+1)x + Kc₀² = 0
         let x = ((2.0 * k * c0 + 1.0) - (4.0 * k * c0 + 1.0).sqrt()) / (2.0 * k);
