@@ -39,29 +39,29 @@ enum DeltaGInput {
 }
 
 fn resolve_energy_spec(
-    delta_g: Option<DeltaGInput>,
+    dg_s: Option<DeltaGInput>,
     delta_g_over_rt: Option<f64>,
-    delta_h: Option<f64>,
-    delta_s: Option<f64>,
+    dh_s: Option<f64>,
+    ds_s: Option<f64>,
 ) -> PyResult<EnergySpec> {
-    // Split delta_g into its two forms for cleaner matching.
-    let (dg_scalar, dg_at_temp) = match delta_g {
+    // Split dg_s into its two forms for cleaner matching.
+    let (dg_scalar, dg_at_temp) = match dg_s {
         Some(DeltaGInput::Scalar(v)) => (Some(v), None),
         Some(DeltaGInput::AtTemp(pair)) => (None, Some(pair)),
         None => (None, None),
     };
 
-    match (dg_scalar, dg_at_temp, delta_g_over_rt, delta_h, delta_s) {
-        // delta_g=<float>
+    match (dg_scalar, dg_at_temp, delta_g_over_rt, dh_s, ds_s) {
+        // dg_s=<float>
         (Some(dg), None, None, None, None) => Ok(EnergySpec::DeltaG(dg)),
         // delta_g_over_rt=<float>
         (None, None, Some(dgrt), None, None) => Ok(EnergySpec::DeltaGOverRT(dgrt)),
-        // delta_h=<float>, delta_s=<float>
+        // dh_s=<float>, ds_s=<float>
         (None, None, None, Some(dh), Some(ds)) => Ok(EnergySpec::DeltaHS {
             delta_h: dh,
             delta_s: ds,
         }),
-        // delta_g=(<float>, <temp_C>), delta_s=<float>  →  derive ΔH
+        // dg_s=(<float>, <temp_C>), ds_s=<float>  →  derive ΔH
         (None, Some((dg, temp_c)), None, None, Some(ds)) => {
             let temp_k = temp_c + 273.15;
             let dh = dg + temp_k * ds;
@@ -70,26 +70,26 @@ fn resolve_energy_spec(
                 delta_s: ds,
             })
         }
-        // delta_g=(<float>, <temp_C>) without delta_s
+        // dg_s=(<float>, <temp_C>) without ds_s
         (None, Some(_), None, None, None) => Err(PyValueError::new_err(
-            "delta_g as (value, temperature_C) requires delta_s",
+            "dg_s as (value, temperature_C) requires ds_s",
         )),
-        // delta_g=<float> with delta_s but no delta_h
+        // dg_s=<float> with ds_s but no dh_s
         (Some(_), None, None, None, Some(_)) => Err(PyValueError::new_err(
-            "delta_g as a scalar cannot be combined with delta_s; \
-             use delta_g=(value, temperature_C) tuple form, or delta_h + delta_s",
+            "dg_s as a scalar cannot be combined with ds_s; \
+             use dg_s=(value, temperature_C) tuple form, or dh_s + ds_s",
         )),
-        // delta_h without delta_s, or vice versa
+        // dh_s without ds_s, or vice versa
         (None, None, None, Some(_), None) | (None, None, None, None, Some(_)) => Err(
-            PyValueError::new_err("delta_h and delta_s must both be specified"),
+            PyValueError::new_err("dh_s and ds_s must both be specified"),
         ),
         // Nothing specified
         (None, None, None, None, None) => Err(PyValueError::new_err(
-            "must specify energy: delta_g, delta_g_over_rt, or (delta_h and delta_s)",
+            "must specify energy: dg_s, delta_g_over_rt, or (dh_s and ds_s)",
         )),
         // Conflicting specifications
         _ => Err(PyValueError::new_err(
-            "specify only one of: delta_g, delta_g_over_rt, or (delta_h and delta_s)",
+            "specify only one of: dg_s, delta_g_over_rt, or (dh_s and ds_s)",
         )),
     }
 }
@@ -116,7 +116,7 @@ fn resolve_energy_spec(
 /// >>> eq = (equiconc.System()
 /// ...     .monomer("A", 100e-9)
 /// ...     .monomer("B", 100e-9)
-/// ...     .complex("AB", [("A", 1), ("B", 1)], delta_g=-10.0)
+/// ...     .complex("AB", [("A", 1), ("B", 1)], dg_s=-10.0)
 /// ...     .equilibrium())
 /// >>> eq["AB"] > 0
 /// True
@@ -175,13 +175,13 @@ impl PySystem {
     ///
     /// Exactly one energy specification must be provided:
     ///
-    /// - ``delta_g``: standard free energy of formation in kcal/mol
-    /// - ``delta_g=(value, temperature_C)`` + ``delta_s``: ΔG at a
+    /// - ``dg_s``: standard free energy of formation in kcal/mol
+    /// - ``dg_s=(value, temperature_C)`` + ``ds_s``: ΔG at a
     ///   known temperature plus ΔS; ΔH is derived as
     ///   ΔH = ΔG + T·ΔS and ΔG at the system temperature is
     ///   computed as ΔH − T_sys·ΔS
     /// - ``delta_g_over_rt``: dimensionless ΔG/RT (no temperature needed)
-    /// - ``delta_h`` + ``delta_s``: enthalpy (kcal/mol) and entropy
+    /// - ``dh_s`` + ``ds_s``: enthalpy (kcal/mol) and entropy
     ///   (kcal/(mol·K)); ΔG is computed as ΔH − TΔS at solve time
     ///
     /// Parameters
@@ -192,37 +192,37 @@ impl PySystem {
     ///     Monomer composition as ``[(monomer_name, count), ...]``.
     ///     Each monomer must have been previously added and count
     ///     must be >= 1.
-    /// delta_g : float or (float, float), optional
+    /// dg_s : float or (float, float), optional
     ///     Standard free energy of formation in kcal/mol at 1 M
     ///     standard state. Either a scalar (must be finite), or a
-    ///     tuple ``(delta_g, temperature_C)`` giving ΔG at a known
-    ///     temperature in °C; the latter form requires ``delta_s``.
+    ///     tuple ``(dg_s, temperature_C)`` giving ΔG at a known
+    ///     temperature in °C; the latter form requires ``ds_s``.
     /// delta_g_over_rt : float, optional
     ///     Dimensionless free energy ΔG/(RT). When all complexes use
     ///     this form, temperature is not required.
-    /// delta_h : float, optional
+    /// dh_s : float, optional
     ///     Enthalpy of formation in kcal/mol. Must be paired with
-    ///     ``delta_s``.
-    /// delta_s : float, optional
+    ///     ``ds_s``.
+    /// ds_s : float, optional
     ///     Entropy of formation in kcal/(mol·K). Must be paired with
-    ///     ``delta_h``, or with the tuple form of ``delta_g``.
+    ///     ``dh_s``, or with the tuple form of ``dg_s``.
     ///
     /// Returns
     /// -------
     /// System
     ///     The same system instance, for method chaining.
-    #[pyo3(signature = (name, composition, *, delta_g=None, delta_g_over_rt=None, delta_h=None, delta_s=None))]
+    #[pyo3(signature = (name, composition, *, dg_s=None, delta_g_over_rt=None, dh_s=None, ds_s=None))]
     fn complex(
         slf: Py<Self>,
         py: Python<'_>,
         name: &str,
         composition: Vec<(String, usize)>,
-        delta_g: Option<DeltaGInput>,
+        dg_s: Option<DeltaGInput>,
         delta_g_over_rt: Option<f64>,
-        delta_h: Option<f64>,
-        delta_s: Option<f64>,
+        dh_s: Option<f64>,
+        ds_s: Option<f64>,
     ) -> PyResult<Py<Self>> {
-        let energy = resolve_energy_spec(delta_g, delta_g_over_rt, delta_h, delta_s)?;
+        let energy = resolve_energy_spec(dg_s, delta_g_over_rt, dh_s, ds_s)?;
         let mut inner = slf.borrow_mut(py);
         inner.complexes.push((name.to_string(), composition, energy));
         drop(inner);
@@ -348,10 +348,18 @@ impl PyEquilibrium {
     ///
     /// Returns
     /// -------
-    /// float or None
-    ///     Concentration in molar, or ``None`` if not found.
-    fn concentration(&self, name: &str) -> Option<f64> {
-        self.concentrations.get(name).copied()
+    /// float
+    ///     Concentration in molar.
+    ///
+    /// Raises
+    /// ------
+    /// KeyError
+    ///     If the species name is not found.
+    fn concentration(&self, name: &str) -> PyResult<f64> {
+        self.concentrations
+            .get(name)
+            .copied()
+            .ok_or_else(|| PyKeyError::new_err(name.to_string()))
     }
 
     /// Dict-like access: `eq["AB"]`. Raises `KeyError` if unknown.

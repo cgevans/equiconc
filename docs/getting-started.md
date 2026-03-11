@@ -38,7 +38,7 @@ eq = (
     equiconc.System()
     .monomer("A", 100e-9)       # 100 nM total
     .monomer("B", 100e-9)       # 100 nM total
-    .complex("AB", [("A", 1), ("B", 1)], delta_g=-10.0)
+    .complex("AB", [("A", 1), ("B", 1)], dg_s=-10.0)
     .equilibrium()
 )
 
@@ -64,7 +64,7 @@ You can specify complex energies in three ways:
 **Standard free energy** (\(\Delta G^\circ\) in kcal/mol):
 
 ```python
-sys.complex("AB", [("A", 1), ("B", 1)], delta_g=-10.0)
+sys.complex("AB", [("A", 1), ("B", 1)], dg_s=-10.0)
 ```
 
 **Dimensionless free energy** (\(\Delta G / RT\), unitless). When all
@@ -79,7 +79,7 @@ kcal/(mol&middot;K)). The free energy \(\Delta G = \Delta H - T \Delta S\)
 is computed at solve time, so changing temperature shifts the equilibrium:
 
 ```python
-sys.complex("AB", [("A", 1), ("B", 1)], delta_h=-50.0, delta_s=-0.13)
+sys.complex("AB", [("A", 1), ("B", 1)], dh_s=-50.0, ds_s=-0.13)
 ```
 
 ### Builder pattern
@@ -91,7 +91,7 @@ The API uses a fluent builder pattern. Chain calls to `monomer()` and
 sys = equiconc.System(temperature_C=37)
 sys = sys.monomer("A", 1e-6)
 sys = sys.monomer("B", 1e-6)
-sys = sys.complex("AB", [("A", 1), ("B", 1)], delta_g=-10.0)
+sys = sys.complex("AB", [("A", 1), ("B", 1)], dg_s=-10.0)
 eq = sys.equilibrium()
 ```
 
@@ -131,9 +131,9 @@ eq = (
     .monomer("A", 1e-6)
     .monomer("B", 1e-6)
     .monomer("C", 1e-6)
-    .complex("AB", [("A", 1), ("B", 1)], delta_g=-10.0)
-    .complex("AC", [("A", 1), ("C", 1)], delta_g=-8.0)
-    .complex("ABC", [("A", 1), ("B", 1), ("C", 1)], delta_g=-15.0)
+    .complex("AB", [("A", 1), ("B", 1)], dg_s=-10.0)
+    .complex("AC", [("A", 1), ("C", 1)], dg_s=-8.0)
+    .complex("ABC", [("A", 1), ("B", 1), ("C", 1)], dg_s=-15.0)
     .equilibrium()
 )
 ```
@@ -143,10 +143,10 @@ eq = (
 - **Concentrations** are in **molar** (mol/L).
 - **Temperature** defaults to **25 &deg;C** (298.15 K). Specify via
   `temperature_C` (Celsius) or `temperature_K` (Kelvin).
-- **Free energies** (`delta_g`) are in **kcal/mol** with a **1 M standard
+- **Free energies** (`dg_s`) are in **kcal/mol** with a **1 M standard
   state** (\(u_0 = 1 \text{M}\)).
-- **Enthalpy** (`delta_h`) is in **kcal/mol**;
-  **entropy** (`delta_s`) is in **kcal/(mol&middot;K)**.
+- **Enthalpy** (`dh_s`) is in **kcal/mol**;
+  **entropy** (`ds_s`) is in **kcal/(mol&middot;K)**.
 - **Dimensionless energies** (`delta_g_over_rt`) are unitless
   \(\Delta G / RT\) values.
 
@@ -180,5 +180,5 @@ except ValueError as e:
 try:
     equiconc.System().monomer("A", 1e-9).complex("AB", [("A", 1)])
 except ValueError as e:
-    print(e)  # "must specify energy: delta_g, delta_g_over_rt, ..."
+    print(e)  # "must specify energy: dg_s, delta_g_over_rt, ..."
 ```

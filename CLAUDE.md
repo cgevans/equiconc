@@ -24,6 +24,10 @@ just docs              # pre-execute notebooks + build with zensical
 just docs-serve        # pre-execute notebooks + serve with live reload
 ```
 
+## Changelog
+
+Use https://keepachangelog.com/en/1.1.0/ standard.
+
 ## Coverage
 
 Requires: `cargo-llvm-cov` (`cargo install cargo-llvm-cov`) and `just`.
@@ -58,7 +62,7 @@ Gated behind the `python` Cargo feature. `PySystem` wraps the Rust builder with 
 
 Python API differences from Rust:
 - Temperature defaults to 25 °C; set via `temperature_C=` or `temperature_K=` keyword args
-- Complex energy can be specified as `delta_g` (kcal/mol), `delta_g_over_rt` (unitless ΔG/RT), or `delta_h`+`delta_s` (kcal/mol and kcal/(mol·K))
+- Complex energy can be specified as `dg_s` (kcal/mol), `delta_g_over_rt` (unitless ΔG/RT), or `dh_s`+`ds_s` (kcal/mol and kcal/(mol·K))
 - Energy args are keyword-only on `complex()`
 
 Python uses `uv` for management.  Do not use `pip`, and prefer things like `uv add` over `uv pip install`, including using dependency groups, unless absolutely necessary.
