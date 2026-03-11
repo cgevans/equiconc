@@ -57,3 +57,4 @@ nav:
   - Examples:
       - Quickstart: notebooks/quickstart.md
       - Competitive Binding: notebooks/competitive_binding.md
+  - Changelog: changelog.md
