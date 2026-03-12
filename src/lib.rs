@@ -66,7 +66,6 @@ pub enum EquilibriumError {
     DuplicateMonomer(String),
     DuplicateComplex(String),
     ZeroCount(String),
-    DuplicateMonomerInComposition(String),
     InvalidDeltaG(f64),
     EmptyName,
     DuplicateSpeciesName(String),
@@ -92,9 +91,6 @@ impl std::fmt::Display for EquilibriumError {
             Self::DuplicateComplex(name) => write!(f, "duplicate complex: {name}"),
             Self::ZeroCount(name) => {
                 write!(f, "zero stoichiometric count for monomer: {name}")
-            }
-            Self::DuplicateMonomerInComposition(name) => {
-                write!(f, "duplicate monomer in composition: {name}")
             }
             Self::InvalidDeltaG(dg) => {
                 write!(f, "invalid delta_g: {dg} (must be finite)")
@@ -284,12 +280,11 @@ impl System {
                     .ok_or_else(|| {
                         EquilibriumError::UnknownMonomer(monomer_name.clone())
                     })?;
-                if comp.iter().any(|&(existing_idx, _): &(usize, usize)| existing_idx == idx) {
-                    return Err(EquilibriumError::DuplicateMonomerInComposition(
-                        monomer_name.clone(),
-                    ));
+                if let Some(entry) = comp.iter_mut().find(|(existing_idx, _): &&mut (usize, usize)| *existing_idx == idx) {
+                    entry.1 += count;
+                } else {
+                    comp.push((idx, *count));
                 }
-                comp.push((idx, *count));
             }
 
             complex_names.push(name.clone());
@@ -1007,7 +1002,6 @@ mod tests {
             (EquilibriumError::DuplicateMonomer("A".into()), "duplicate monomer"),
             (EquilibriumError::DuplicateComplex("AB".into()), "duplicate complex"),
             (EquilibriumError::ZeroCount("A".into()), "zero stoichiometric count"),
-            (EquilibriumError::DuplicateMonomerInComposition("A".into()), "duplicate monomer in composition"),
             (EquilibriumError::InvalidDeltaG(f64::NAN), "invalid delta_g"),
             (EquilibriumError::EmptyName, "must not be empty"),
             (EquilibriumError::DuplicateSpeciesName("A".into()), "species name already in use"),
@@ -1024,13 +1018,18 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_monomer_in_composition() {
-        let err = System::new()
-            .monomer("A", 1e-9)
-            .monomer("B", 1e-9)
-            .complex("AB", &[("A", 1), ("A", 2)], -10.0)
-            .equilibrium().unwrap_err();
-        assert!(matches!(err, EquilibriumError::DuplicateMonomerInComposition(ref n) if n == "A"));
+    fn duplicate_monomer_in_composition_sums() {
+        // ("A", 1) + ("A", 2) should be equivalent to ("A", 3)
+        let eq_dup = System::new()
+            .monomer("A", 1e-6)
+            .complex("A3", &[("A", 1), ("A", 2)], -15.0)
+            .equilibrium().unwrap();
+        let eq_merged = System::new()
+            .monomer("A", 1e-6)
+            .complex("A3", &[("A", 3)], -15.0)
+            .equilibrium().unwrap();
+        assert!((eq_dup.concentration("A3").unwrap() - eq_merged.concentration("A3").unwrap()).abs() < 1e-20);
+        assert!((eq_dup.concentration("A").unwrap() - eq_merged.concentration("A").unwrap()).abs() < 1e-20);
     }
 
     #[test]

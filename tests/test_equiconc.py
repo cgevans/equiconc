@@ -177,15 +177,22 @@ def test_zero_count_error():
         )
 
 
-def test_duplicate_monomer_in_composition_error():
-    with pytest.raises(ValueError, match="duplicate monomer in composition"):
-        (
-            equiconc.System()
-            .monomer("A", 1e-9)
-            .monomer("B", 1e-9)
-            .complex("AB", [("A", 1), ("A", 2)], dg_st=-10.0)
-            .equilibrium()
-        )
+def test_duplicate_monomer_in_composition_sums():
+    """Duplicate monomers in a composition should have their counts summed."""
+    eq_dup = (
+        equiconc.System()
+        .monomer("A", 1e-6)
+        .complex("A3", [("A", 1), ("A", 2)], dg_st=-15.0)
+        .equilibrium()
+    )
+    eq_merged = (
+        equiconc.System()
+        .monomer("A", 1e-6)
+        .complex("A3", [("A", 3)], dg_st=-15.0)
+        .equilibrium()
+    )
+    assert eq_dup["A3"] == pytest.approx(eq_merged["A3"])
+    assert eq_dup["A"] == pytest.approx(eq_merged["A"])
 
 
 def test_nan_delta_g_error():
