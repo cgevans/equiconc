@@ -70,7 +70,7 @@ def _nupack_conc(strand_concs, complexes, T=310.15):
 
 def _equiconc(strand_concs, complexes, T=310.15):
     """Solve equilibrium concentrations with equiconc."""
-    sys = equiconc.System(temperature=T)
+    sys = equiconc.System(temperature_K=T)
     for name, c0 in strand_concs.items():
         sys = sys.monomer(name, c0)
     for name, composition, dg in complexes:
@@ -235,6 +235,44 @@ class TestDimersAndTrimer:
 
         eq = _equiconc(strands, complexes)
         nu = _nupack_conc(strands, complexes)
+        _assert_match(eq, nu)
+
+
+class TestCoffeeBug1NaN:
+    """Scenario that triggers COFFEE's NaN bug: single monomer with
+    positive ΔG (unfavorable conformational state).
+
+    A → A*, ΔG = +3.905 kcal/mol, T = 293.15 K (20 °C), [A]₀ = 1 mM.
+    COFFEE returns NaN; equiconc and NUPACK should agree.
+    """
+
+    def test_vs_nupack(self):
+        strands = {"A": 1e-3}
+        complexes = [("A*", [("A", 1)], 3.9049710516192473)]
+        T = 293.15
+
+        eq = _equiconc(strands, complexes, T)
+        nu = _nupack_conc(strands, complexes, T)
+        _assert_match(eq, nu)
+
+
+class TestCoffeeBug2PrematureConvergence:
+    """Scenario that triggers COFFEE's premature convergence bug:
+    strong binding with higher stoichiometry and asymmetric concentrations.
+
+    A + 2B → AB₂, ΔG = -39.47 kcal/mol, T = 349.68 K (76.5 °C),
+    [A]₀ = 1 mM, [B]₀ = 162.4 μM.
+    COFFEE returns [A]_free > [A]₀ (physically impossible);
+    equiconc and NUPACK should agree.
+    """
+
+    def test_vs_nupack(self):
+        strands = {"A": 0.001, "B": 0.0001623670683959106}
+        complexes = [("AB2", [("A", 1), ("B", 2)], -39.469272500902164)]
+        T = 349.67994671005505
+
+        eq = _equiconc(strands, complexes, T)
+        nu = _nupack_conc(strands, complexes, T)
         _assert_match(eq, nu)
 
 

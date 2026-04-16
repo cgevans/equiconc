@@ -15,7 +15,7 @@ readme = "README.md"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-nalgebra = "0.34"
+ndarray = "0.16"
 pyo3 = { version = "0.28", optional = true, features = ["extension-module", "abi3-py310"] }
 
 [dev-dependencies]
@@ -28,4 +28,8 @@ python = ["pyo3"]
 
 [[bench]]
 name = "equilibrium"
+harness = false
+
+[[bench]]
+name = "vs_coffee"
 harness = false

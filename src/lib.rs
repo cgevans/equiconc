@@ -41,7 +41,7 @@
 //! # Ok::<(), equiconc::EquilibriumError>(())
 //! ```
 
-use nalgebra::{DMatrix, DVector};
+use ndarray::{Array1, Array2};
 
 /// Gas constant in kcal/(mol·K).
 pub const R: f64 = 1.987204e-3;
@@ -220,6 +220,8 @@ impl System {
         ),
         EquilibriumError,
     > {
+        use std::collections::HashMap;
+
         // Temperature validation
         if !(self.temperature > 0.0 && self.temperature.is_finite()) {
             return Err(EquilibriumError::InvalidTemperature(self.temperature));
@@ -230,9 +232,10 @@ impl System {
             return Err(EquilibriumError::NoMonomers);
         }
 
-        // Validate monomers
-        let mut monomer_names: Vec<String> = Vec::new();
-        let mut monomer_concs: Vec<f64> = Vec::new();
+        // Validate monomers and build index
+        let mut monomer_idx: HashMap<&str, usize> = HashMap::with_capacity(self.monomers.len());
+        let mut monomer_names: Vec<String> = Vec::with_capacity(self.monomers.len());
+        let mut monomer_concs: Vec<f64> = Vec::with_capacity(self.monomers.len());
         for (name, conc) in &self.monomers {
             if name.is_empty() {
                 return Err(EquilibriumError::EmptyName);
@@ -240,17 +243,19 @@ impl System {
             if !(conc > &0.0 && conc.is_finite()) {
                 return Err(EquilibriumError::InvalidConcentration(*conc));
             }
-            if monomer_names.iter().any(|n| n == name) {
+            if monomer_idx.contains_key(name.as_str()) {
                 return Err(EquilibriumError::DuplicateMonomer(name.clone()));
             }
+            monomer_idx.insert(name, monomer_names.len());
             monomer_names.push(name.clone());
             monomer_concs.push(*conc);
         }
 
         // Validate complexes and resolve monomer references
-        let mut complex_names: Vec<String> = Vec::new();
-        let mut resolved_comps: Vec<Vec<(usize, usize)>> = Vec::new();
-        let mut complex_dgs: Vec<f64> = Vec::new();
+        let mut all_names: HashMap<&str, ()> = monomer_idx.keys().map(|&k| (k, ())).collect();
+        let mut complex_names: Vec<String> = Vec::with_capacity(self.complexes.len());
+        let mut resolved_comps: Vec<Vec<(usize, usize)>> = Vec::with_capacity(self.complexes.len());
+        let mut complex_dgs: Vec<f64> = Vec::with_capacity(self.complexes.len());
 
         for (name, composition, delta_g) in &self.complexes {
             if name.is_empty() {
@@ -262,11 +267,12 @@ impl System {
             if !delta_g.is_finite() {
                 return Err(EquilibriumError::InvalidDeltaG(*delta_g));
             }
-            if complex_names.iter().any(|n| n == name) {
+            if all_names.contains_key(name.as_str()) {
+                // Could be a duplicate complex or collision with a monomer
+                if monomer_idx.contains_key(name.as_str()) {
+                    return Err(EquilibriumError::DuplicateSpeciesName(name.clone()));
+                }
                 return Err(EquilibriumError::DuplicateComplex(name.clone()));
-            }
-            if monomer_names.iter().any(|n| n == name) {
-                return Err(EquilibriumError::DuplicateSpeciesName(name.clone()));
             }
 
             let mut comp = Vec::new();
@@ -274,9 +280,8 @@ impl System {
                 if *count == 0 {
                     return Err(EquilibriumError::ZeroCount(monomer_name.clone()));
                 }
-                let idx = monomer_names
-                    .iter()
-                    .position(|n| n == monomer_name)
+                let &idx = monomer_idx
+                    .get(monomer_name.as_str())
                     .ok_or_else(|| {
                         EquilibriumError::UnknownMonomer(monomer_name.clone())
                     })?;
@@ -287,6 +292,7 @@ impl System {
                 }
             }
 
+            all_names.insert(name, ());
             complex_names.push(name.clone());
             resolved_comps.push(comp);
             complex_dgs.push(*delta_g);
@@ -295,7 +301,8 @@ impl System {
         Ok((monomer_names, monomer_concs, complex_names, resolved_comps, complex_dgs))
     }
 
-    /// Build the stoichiometry matrix **A**, the log-partition-function vector
+    /// Build the stoichiometry matrix **Aᵀ** (transposed for cache-friendly
+    /// access in the hot Aᵀλ multiply), the log-partition-function vector
     /// **log_q**, and the total-concentration vector **c⁰**.
     fn build_problem(
         n_mon: usize,
@@ -303,34 +310,35 @@ impl System {
         resolved_comps: &[Vec<(usize, usize)>],
         complex_dgs: &[f64],
         temperature: f64,
-    ) -> (DMatrix<f64>, DVector<f64>, DVector<f64>) {
+    ) -> (Array2<f64>, Array1<f64>, Array1<f64>) {
         let n_cplx = resolved_comps.len();
         let n_species = n_mon + n_cplx;
 
-        // A: n_monomers × n_species
-        let mut a = DMatrix::zeros(n_mon, n_species);
+        // at: n_species × n_monomers  (= Aᵀ, stored row-major so that
+        // at.dot(λ) — the dominant O(mn) operation — reads contiguous rows)
+        let mut at = Array2::zeros((n_species, n_mon));
         // Identity block for free monomers
         for i in 0..n_mon {
-            a[(i, i)] = 1.0;
+            at[[i, i]] = 1.0;
         }
-        // Complex columns
+        // Complex rows
         for (k, comp) in resolved_comps.iter().enumerate() {
             for &(mi, count) in comp {
-                a[(mi, n_mon + k)] = count as f64;
+                at[[n_mon + k, mi]] = count as f64;
             }
         }
 
         // log_q: 0 for free monomers, -ΔG°/(RT) for complexes
-        let mut log_q = DVector::zeros(n_species);
+        let mut log_q = Array1::zeros(n_species);
         let rt = R * temperature;
         for (k, &dg) in complex_dgs.iter().enumerate() {
             log_q[n_mon + k] = -dg / rt;
         }
 
         // c⁰
-        let c0 = DVector::from_iterator(n_mon, monomer_concs.iter().copied());
+        let c0 = Array1::from_vec(monomer_concs.to_vec());
 
-        (a, log_q, c0)
+        (at, log_q, c0)
     }
 
     /// Solve for equilibrium concentrations.
@@ -350,29 +358,26 @@ impl System {
                 free_monomer_concentrations: monomer_concs,
                 complex_concentrations: Vec::new(),
                 converged_fully: true,
+                iterations: 0,
             });
         }
 
-        let (a, log_q, c0) =
+        let (at, log_q, c0) =
             Self::build_problem(n_mon, &monomer_concs, &resolved_comps, &complex_dgs, self.temperature);
-        let solution = solve_dual(&a, &log_q, &c0)?;
+        let solution = solve_dual(&at, &log_q, &c0)?;
 
         // Recover concentrations: c_j = exp(log_q_j + (Aᵀλ)_j)
-        let log_c = &log_q + a.transpose() * &solution.lambda;
+        let log_c = &log_q + &at.dot(&solution.lambda);
         let concentrations: Vec<f64> =
             log_c.iter().map(|&lc| lc.min(LOG_C_MAX).exp()).collect();
 
-        // Debug-mode validation — these are sanity checks to catch gross
-        // solver bugs.  Tolerances are generous (1%) because strong binding
-        // with picomolar concentrations can span 20+ orders of magnitude,
-        // amplifying f64 rounding through exp() recovery.
+        // Debug-mode validation
         #[cfg(debug_assertions)]
         {
             let rt = R * self.temperature;
-            // Mass conservation
             for i in 0..n_mon {
                 let total: f64 =
-                    (0..concentrations.len()).map(|j| a[(i, j)] * concentrations[j]).sum();
+                    (0..concentrations.len()).map(|j| at[[j, i]] * concentrations[j]).sum();
                 debug_assert!(
                     (total - c0[i]).abs() < 1e-2 * c0[i] + 1e-30,
                     "mass conservation violated for monomer {}: {total} != {}",
@@ -380,7 +385,6 @@ impl System {
                     c0[i]
                 );
             }
-            // Equilibrium condition (in log-space to avoid overflow)
             for (k, comp) in resolved_comps.iter().enumerate() {
                 let log_keq = -complex_dgs[k] / rt;
                 let mut log_expected = log_keq;
@@ -401,6 +405,9 @@ impl System {
             solution.convergence,
             SolverConvergence::Full { .. }
         );
+        let iterations = match solution.convergence {
+            SolverConvergence::Full { iterations } | SolverConvergence::Relaxed { iterations, .. } => iterations,
+        };
 
         Ok(Equilibrium {
             monomer_names,
@@ -408,6 +415,7 @@ impl System {
             free_monomer_concentrations: concentrations[..n_mon].to_vec(),
             complex_concentrations: concentrations[n_mon..].to_vec(),
             converged_fully,
+            iterations,
         })
     }
 }
@@ -423,6 +431,7 @@ pub struct Equilibrium {
     free_monomer_concentrations: Vec<f64>,
     complex_concentrations: Vec<f64>,
     converged_fully: bool,
+    iterations: usize,
 }
 
 impl Equilibrium {
@@ -472,88 +481,175 @@ impl Equilibrium {
     pub fn converged_fully(&self) -> bool {
         self.converged_fully
     }
+
+    /// Number of solver iterations used.
+    #[must_use]
+    pub fn iterations(&self) -> usize {
+        self.iterations
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Linear algebra helpers (small m×m operations)
+// ---------------------------------------------------------------------------
+
+/// L2 norm of a vector.
+fn norm(v: &Array1<f64>) -> f64 {
+    v.dot(v).sqrt()
+}
+
+/// Cholesky factorization of a symmetric positive-definite matrix.
+/// Returns the Newton step p = -H⁻¹g, or None if H is not positive definite.
+fn cholesky_solve(h: &Array2<f64>, g: &Array1<f64>) -> Option<Array1<f64>> {
+    let n = g.len();
+    // Compute L (lower triangular, H = LLᵀ)
+    let mut l = Array2::zeros((n, n));
+    for i in 0..n {
+        for j in 0..=i {
+            let mut sum = h[[i, j]];
+            for k in 0..j {
+                sum -= l[[i, k]] * l[[j, k]];
+            }
+            if i == j {
+                if sum <= 0.0 {
+                    return None;
+                }
+                l[[i, j]] = sum.sqrt();
+            } else {
+                l[[i, j]] = sum / l[[j, j]];
+            }
+        }
+    }
+    // Forward solve: Lz = -g
+    let mut z = Array1::zeros(n);
+    for i in 0..n {
+        let mut sum = -g[i];
+        for k in 0..i {
+            sum -= l[[i, k]] * z[k];
+        }
+        z[i] = sum / l[[i, i]];
+    }
+    // Back solve: Lᵀp = z
+    let mut p = Array1::zeros(n);
+    for i in (0..n).rev() {
+        let mut sum = z[i];
+        for k in (i + 1)..n {
+            sum -= l[[k, i]] * p[k];
+        }
+        p[i] = sum / l[[i, i]];
+    }
+    Some(p)
 }
 
 // ---------------------------------------------------------------------------
 // Trust-region Newton solver on the dual
 // ---------------------------------------------------------------------------
 
-struct DualEval {
-    f: f64,
-    grad: DVector<f64>,
-    hessian: DMatrix<f64>,
+/// Pre-allocated working buffers for the solver, reused across iterations.
+struct WorkBuffers {
+    c: Array1<f64>,        // n_species: concentrations
+    grad: Array1<f64>,     // n_mon: gradient
+    hessian: Array2<f64>,  // n_mon × n_mon: Hessian
 }
 
-/// Evaluate the dual objective, gradient, and Hessian at λ.
-fn evaluate(
-    a: &DMatrix<f64>,
-    log_q: &DVector<f64>,
-    c0: &DVector<f64>,
-    lambda: &DVector<f64>,
-) -> DualEval {
-    let n_mon = a.nrows();
-    let n_species = a.ncols();
+impl WorkBuffers {
+    fn new(n_mon: usize, n_species: usize) -> Self {
+        WorkBuffers {
+            c: Array1::zeros(n_species),
+            grad: Array1::zeros(n_mon),
+            hessian: Array2::zeros((n_mon, n_mon)),
+        }
+    }
+}
 
-    // log_c = log_q + Aᵀλ
-    let log_c = log_q + a.transpose() * lambda;
+/// Evaluate the dual objective, gradient, and Hessian at λ,
+/// writing into pre-allocated buffers. Returns f.
+///
+/// `at` is the transposed stoichiometry matrix Aᵀ (n_species × n_mon),
+/// stored row-major so that the dominant `Aᵀλ` multiply reads contiguous rows.
+fn evaluate_into(
+    at: &Array2<f64>,
+    log_q: &Array1<f64>,
+    c0: &Array1<f64>,
+    lambda: &Array1<f64>,
+    w: &mut WorkBuffers,
+) -> f64 {
+    let n_species = at.nrows();
+    let n_mon = at.ncols();
 
-    // c_j = exp(log_c_j), clamped to avoid overflow
-    let c = DVector::from_iterator(
-        n_species,
-        log_c.iter().map(|&lc| lc.min(LOG_C_MAX).exp()),
-    );
+    // c = exp(min(log_q + Aᵀλ, LOG_C_MAX))
+    // Compute Aᵀλ into w.c, then fuse the add + clamp + exp in-place
+    ndarray::linalg::general_mat_vec_mul(1.0, at, lambda, 0.0, &mut w.c);
+    w.c += log_q;
+    w.c.mapv_inplace(|lc| lc.min(LOG_C_MAX).exp());
 
     // f = -λᵀc⁰ + Σ_j c_j
-    let f = -lambda.dot(c0) + c.sum();
+    let f = -lambda.dot(c0) + w.c.sum();
 
-    // grad = -c⁰ + A c
-    let grad = -c0 + a * &c;
+    // grad = -c⁰ + Aᵀᵀ·c
+    ndarray::linalg::general_mat_vec_mul(1.0, &at.t(), &w.c, 0.0, &mut w.grad);
+    w.grad -= c0;
 
-    // H = A diag(c) Aᵀ  (symmetric, computed directly)
-    let mut hessian = DMatrix::zeros(n_mon, n_mon);
+    // H = A diag(c) Aᵀ  (sparse loop, writing into pre-allocated hessian)
+    w.hessian.fill(0.0);
     for k in 0..n_species {
-        let ck = c[k];
+        let ck = w.c[k];
         for i in 0..n_mon {
-            let aik = a[(i, k)];
+            let aik = at[[k, i]];
             if aik == 0.0 {
                 continue;
             }
             for j in i..n_mon {
-                let ajk = a[(j, k)];
+                let ajk = at[[k, j]];
                 if ajk == 0.0 {
                     continue;
                 }
                 let val = aik * ck * ajk;
-                hessian[(i, j)] += val;
+                w.hessian[[i, j]] += val;
                 if i != j {
-                    hessian[(j, i)] += val;
+                    w.hessian[[j, i]] += val;
                 }
             }
         }
     }
 
-    DualEval { f, grad, hessian }
+    f
+}
+
+/// Evaluate only the dual objective at λ (no gradient or Hessian).
+///
+/// Uses the `c` buffer from WorkBuffers to avoid allocation.
+fn evaluate_objective_into(
+    at: &Array2<f64>,
+    log_q: &Array1<f64>,
+    c0: &Array1<f64>,
+    lambda: &Array1<f64>,
+    c_buf: &mut Array1<f64>,
+) -> f64 {
+    ndarray::linalg::general_mat_vec_mul(1.0, at, lambda, 0.0, c_buf);
+    *c_buf += log_q;
+    let c_sum: f64 = c_buf.iter().map(|&lc| lc.min(LOG_C_MAX).exp()).sum();
+
+    -lambda.dot(c0) + c_sum
 }
 
 /// Compute the dog-leg step within a trust region of radius `delta`.
-fn dogleg_step(grad: &DVector<f64>, hessian: &DMatrix<f64>, delta: f64) -> DVector<f64> {
-    // Cholesky decomposition
-    let chol = match nalgebra::linalg::Cholesky::new(hessian.clone()) {
-        Some(c) => c,
+fn dogleg_step(grad: &Array1<f64>, hessian: &Array2<f64>, delta: f64) -> Array1<f64> {
+    // Cholesky solve for Newton step: p_n = -H⁻¹g
+    let p_n = match cholesky_solve(hessian, grad) {
+        Some(p) => p,
         None => {
             // Defensive: H = A diag(c) Aᵀ with all c > 0, so H is always
             // positive-definite and Cholesky cannot fail in practice.
-            let g_norm = grad.norm();
+            let g_norm = norm(grad);
             if g_norm == 0.0 {
-                return DVector::zeros(grad.len());
+                return Array1::zeros(grad.len());
             }
             return -(delta / g_norm) * grad;
         }
     };
 
-    // Newton step: p_n = -H⁻¹g
-    let p_n = -chol.solve(grad);
-    let p_n_norm = p_n.norm();
+    let p_n_norm = norm(&p_n);
 
     if p_n_norm <= delta {
         return p_n;
@@ -561,18 +657,18 @@ fn dogleg_step(grad: &DVector<f64>, hessian: &DMatrix<f64>, delta: f64) -> DVect
 
     // Cauchy step: p_c = -(gᵀg / gᵀHg) g
     let gtg = grad.dot(grad);
-    let hg = hessian * grad;
+    let hg = hessian.dot(grad);
     let gthg = grad.dot(&hg);
 
     // Guard against near-zero curvature: fall back to steepest descent
     // clipped to trust region, same as the Cholesky failure path.
     if gthg < 1e-30 * gtg {
-        let g_norm = grad.norm();
+        let g_norm = norm(grad);
         return -(delta / g_norm) * grad;
     }
 
     let p_c = -(gtg / gthg) * grad;
-    let p_c_norm = p_c.norm();
+    let p_c_norm = norm(&p_c);
 
     if p_c_norm >= delta {
         return (delta / p_c_norm) * &p_c;
@@ -600,37 +696,34 @@ enum SolverConvergence {
 }
 
 struct DualSolution {
-    lambda: DVector<f64>,
+    lambda: Array1<f64>,
     convergence: SolverConvergence,
 }
 
 /// Solve the dual problem, returning the optimal λ* and convergence info.
 fn solve_dual(
-    a: &DMatrix<f64>,
-    log_q: &DVector<f64>,
-    c0: &DVector<f64>,
+    at: &Array2<f64>,
+    log_q: &Array1<f64>,
+    c0: &Array1<f64>,
 ) -> Result<DualSolution, EquilibriumError> {
     const MAX_ITER: usize = 1000;
-    // Tight absolute floor — allows RTOL to dominate even at picomolar
-    // concentrations. The gradient can be computed to ~c0 * ε ≈ 2e-28,
-    // so this floor never limits achievable precision.
     const ATOL: f64 = 1e-22;
     const RTOL: f64 = 1e-7;
     const ETA: f64 = 1e-4;
     const DELTA_MAX: f64 = 1e10;
 
-    // Initial guess: λ_i = ln(c⁰_i)
-    let mut lambda = DVector::from_iterator(c0.len(), c0.iter().map(|&c| c.ln()));
+    let n_mon = at.ncols();
+    let n_species = at.nrows();
+    let mut w = WorkBuffers::new(n_mon, n_species);
+    let mut lambda = c0.mapv(|c| c.ln());
+    let mut lambda_new = Array1::zeros(n_mon);
     let mut delta = 1.0;
     let mut stagnation = 0u32;
 
     for iter in 0..MAX_ITER {
-        let eval = evaluate(a, log_q, c0, &lambda);
+        let f = evaluate_into(at, log_q, c0, &lambda, &mut w);
 
-        // Per-component convergence: each gradient entry (= mass balance
-        // error for that monomer) must be small relative to its c⁰.
-        if eval
-            .grad
+        if w.grad
             .iter()
             .zip(c0.iter())
             .all(|(&g, &c)| g.abs() < ATOL + RTOL * c)
@@ -641,47 +734,36 @@ fn solve_dual(
             });
         }
 
-        let p = dogleg_step(&eval.grad, &eval.hessian, delta);
-        let p_norm = p.norm();
+        let p = dogleg_step(&w.grad, &w.hessian, delta);
+        let p_norm = norm(&p);
 
-        // Evaluate at candidate point
-        let lambda_new = &lambda + &p;
-        let eval_new = evaluate(a, log_q, c0, &lambda_new);
+        lambda_new.assign(&lambda);
+        lambda_new += &p;
+        let f_new = evaluate_objective_into(at, log_q, c0, &lambda_new, &mut w.c);
 
-        let actual_reduction = eval.f - eval_new.f;
-        let predicted_reduction = -(eval.grad.dot(&p) + 0.5 * p.dot(&(&eval.hessian * &p)));
+        let actual_reduction = f - f_new;
+        let predicted_reduction = -(w.grad.dot(&p) + 0.5 * p.dot(&w.hessian.dot(&p)));
 
         // Track stagnation: objective is effectively at its f64 minimum.
-        // Use a few ULPs of f as the threshold to catch the "grinding"
-        // phase where reductions are non-zero but negligible.
-        if actual_reduction < 4.0 * f64::EPSILON * eval.f.abs().max(1.0) {
+        if actual_reduction < 4.0 * f64::EPSILON * f.abs().max(1.0) {
             stagnation += 1;
         } else {
             stagnation = 0;
         }
 
         // When the trust region has collapsed and steps produce no
-        // measurable reduction, try a full Newton step. The objective
-        // is at f64 precision, but lambda can still improve, yielding
-        // better gradient (mass-balance) accuracy.
-        //
-        // Relaxed convergence criteria for stagnation — uses a generous
-        // absolute floor since the solver is at f64 precision limits.
+        // measurable reduction, try a full Newton step.
         const STAG_ATOL: f64 = 1e-14;
         const STAG_RTOL: f64 = 1e-4;
         if stagnation >= 3 {
-            let p_full = dogleg_step(&eval.grad, &eval.hessian, DELTA_MAX);
-            let lambda_full = &lambda + &p_full;
-            let eval_full = evaluate(a, log_q, c0, &lambda_full);
-            if eval_full.f <= eval.f {
-                lambda = lambda_full;
+            let p_full = dogleg_step(&w.grad, &w.hessian, DELTA_MAX);
+            lambda_new.assign(&lambda);
+            lambda_new += &p_full;
+            let f_full = evaluate_into(at, log_q, c0, &lambda_new, &mut w);
+            if f_full <= f {
+                std::mem::swap(&mut lambda, &mut lambda_new);
 
-                // Check convergence at the new point before continuing.
-                // Without this, the solver can loop indefinitely between
-                // stagnation and recovery when the gradient meets the
-                // relaxed tolerance but not the tight one.
-                if eval_full
-                    .grad
+                if w.grad
                     .iter()
                     .zip(c0.iter())
                     .all(|(&g, &c)| g.abs() < ATOL + RTOL * c)
@@ -693,8 +775,7 @@ fn solve_dual(
                         },
                     });
                 }
-                if eval_full
-                    .grad
+                if w.grad
                     .iter()
                     .zip(c0.iter())
                     .all(|(&g, &c)| g.abs() < STAG_ATOL + STAG_RTOL * c)
@@ -703,19 +784,19 @@ fn solve_dual(
                         lambda,
                         convergence: SolverConvergence::Relaxed {
                             iterations: iter + 1,
-                            gradient_norm: eval_full.grad.norm(),
+                            gradient_norm: norm(&w.grad),
                         },
                     });
                 }
 
-                delta = p_full.norm();
+                delta = norm(&p_full);
                 stagnation = 0;
                 continue;
             }
-            // Recovery failed — accept if close enough with relaxed tolerance
-            // (the solver is at f64 precision limits), otherwise report failure.
-            if eval
-                .grad
+            // Recovery failed — check relaxed tolerance on pre-step gradient.
+            // Need to re-evaluate at lambda since w was overwritten.
+            evaluate_into(at, log_q, c0, &lambda, &mut w);
+            if w.grad
                 .iter()
                 .zip(c0.iter())
                 .all(|(&g, &c)| g.abs() < STAG_ATOL + STAG_RTOL * c)
@@ -724,45 +805,37 @@ fn solve_dual(
                     lambda,
                     convergence: SolverConvergence::Relaxed {
                         iterations: iter + 1,
-                        gradient_norm: eval.grad.norm(),
+                        gradient_norm: norm(&w.grad),
                     },
                 });
             }
             return Err(EquilibriumError::ConvergenceFailure {
                 iterations: iter + 1,
-                gradient_norm: eval.grad.norm(),
+                gradient_norm: norm(&w.grad),
             });
         }
 
         let rho = if predicted_reduction.abs() < 1e-30 {
-            if actual_reduction >= 0.0 {
-                1.0
-            } else {
-                0.0
-            }
+            if actual_reduction >= 0.0 { 1.0 } else { 0.0 }
         } else {
             actual_reduction / predicted_reduction
         };
 
-        // Update trust radius
         if rho < 0.25 {
             delta *= 0.25;
         } else if rho > 0.75 && (p_norm - delta).abs() < 1e-10 * delta {
             delta = (2.0 * delta).min(DELTA_MAX);
         }
 
-        // Accept or reject step
         if rho > ETA {
-            lambda = lambda_new;
+            std::mem::swap(&mut lambda, &mut lambda_new);
         }
     }
 
-    // Defensive: the convex dual always converges for valid inputs,
-    // so this path is unreachable in practice.
-    let final_eval = evaluate(a, log_q, c0, &lambda);
+    evaluate_into(at, log_q, c0, &lambda, &mut w);
     Err(EquilibriumError::ConvergenceFailure {
         iterations: MAX_ITER,
-        gradient_norm: final_eval.grad.norm(),
+        gradient_norm: norm(&w.grad),
     })
 }
 
@@ -797,10 +870,8 @@ mod tests {
             .complex("AB", &[("A", 1), ("B", 1)], dg);
         let eq = sys.equilibrium().unwrap();
 
-        // Analytical solution
         let rt = R * 298.15;
         let k = (-dg / rt).exp();
-        // K(c₀ − x)² = x  ⟹  Kx² − (2Kc₀+1)x + Kc₀² = 0
         let x = ((2.0 * k * c0 + 1.0) - (4.0 * k * c0 + 1.0).sqrt()) / (2.0 * k);
         let free = c0 - x;
 
@@ -821,9 +892,7 @@ mod tests {
         assert!(
             (free_a + 3.0 * aaa - c0).abs() < 1e-8 * c0,
             "mass conservation: {} + 3·{} = {} (expected {c0})",
-            free_a,
-            aaa,
-            free_a + 3.0 * aaa
+            free_a, aaa, free_a + 3.0 * aaa
         );
     }
 
@@ -846,11 +915,8 @@ mod tests {
         let aaa = eq.concentration("aaa").unwrap();
         let bc = eq.concentration("bc").unwrap();
 
-        // Mass conservation for a: [a] + [ab] + 3[aaa] = c₀
         assert!((a + ab + 3.0 * aaa - c0).abs() < 1e-5 * c0);
-        // Mass conservation for b: [b] + [ab] + [bc] = c₀
         assert!((b + ab + bc - c0).abs() < 1e-5 * c0);
-        // Mass conservation for c: [c] + [bc] = c₀
         assert!((c + bc - c0).abs() < 1e-5 * c0);
     }
 
@@ -864,10 +930,7 @@ mod tests {
         let eq = sys.equilibrium().unwrap();
 
         let ab = eq.concentration("AB").unwrap();
-        assert!(
-            (ab - c0).abs() < 1e-6 * c0,
-            "[AB] = {ab}, expected ≈ {c0}"
-        );
+        assert!((ab - c0).abs() < 1e-6 * c0, "[AB] = {ab}, expected ≈ {c0}");
         assert!(eq.concentration("A").unwrap() < 1e-12);
         assert!(eq.concentration("B").unwrap() < 1e-12);
     }
@@ -885,10 +948,10 @@ mod tests {
         let ab = eq.concentration("AB").unwrap();
 
         assert!(ab <= 100.0 * NM + 1e-12);
-        // Mass conservation
         assert!((a + ab - 200.0 * NM).abs() < 1e-8 * 200.0 * NM);
         assert!((b + ab - 100.0 * NM).abs() < 1e-8 * 100.0 * NM);
     }
+
     #[test]
     fn negative_concentration() {
         let err = System::new().monomer("A", -1e-9).equilibrium().unwrap_err();
@@ -1019,7 +1082,6 @@ mod tests {
 
     #[test]
     fn duplicate_monomer_in_composition_sums() {
-        // ("A", 1) + ("A", 2) should be equivalent to ("A", 3)
         let eq_dup = System::new()
             .monomer("A", 1e-6)
             .complex("A3", &[("A", 1), ("A", 2)], -15.0)
@@ -1092,10 +1154,8 @@ mod tests {
 
     #[test]
     fn dogleg_newton_within_trust_region() {
-        // When Newton step is within trust region, dogleg should return it exactly
-        let h = DMatrix::from_row_slice(2, 2, &[2.0, 0.0, 0.0, 2.0]);
-        let g = DVector::from_vec(vec![1.0, 1.0]);
-        // Newton step = -H⁻¹g = [-0.5, -0.5], norm ≈ 0.707
+        let h = Array2::from_shape_vec((2, 2), vec![2.0, 0.0, 0.0, 2.0]).unwrap();
+        let g = Array1::from_vec(vec![1.0, 1.0]);
         let p = dogleg_step(&g, &h, 10.0);
         assert!((p[0] - (-0.5)).abs() < 1e-12);
         assert!((p[1] - (-0.5)).abs() < 1e-12);
@@ -1103,91 +1163,72 @@ mod tests {
 
     #[test]
     fn dogleg_cauchy_clipped() {
-        // When trust region is very small, should return scaled gradient direction
-        let h = DMatrix::from_row_slice(2, 2, &[2.0, 0.0, 0.0, 2.0]);
-        let g = DVector::from_vec(vec![1.0, 1.0]);
-        let delta = 0.01; // Much smaller than Cauchy step norm
+        let h = Array2::from_shape_vec((2, 2), vec![2.0, 0.0, 0.0, 2.0]).unwrap();
+        let g = Array1::from_vec(vec![1.0, 1.0]);
+        let delta = 0.01;
         let p = dogleg_step(&g, &h, delta);
-        let p_norm = p.norm();
+        let p_norm = norm(&p);
         assert!(
             (p_norm - delta).abs() < 1e-12,
-            "step norm {} should equal delta {}",
-            p_norm, delta,
+            "step norm {} should equal delta {}", p_norm, delta,
         );
-        // Direction should be opposite to gradient
-        let cos_angle = p.dot(&g) / (p_norm * g.norm());
+        let cos_angle = p.dot(&g) / (p_norm * norm(&g));
         assert!(cos_angle < -0.99, "step should be opposite gradient");
     }
 
     #[test]
     fn dogleg_interpolation() {
-        // Trust region between Cauchy and Newton norms → dog-leg interpolation
-        let h = DMatrix::from_row_slice(2, 2, &[4.0, 0.0, 0.0, 1.0]);
-        let g = DVector::from_vec(vec![2.0, 2.0]);
-        // Newton step = -H⁻¹g = [-0.5, -2.0], norm ≈ 2.06
-        // Cauchy: gtg=8, Hg=[8,2], gHg=20, alpha=8/20=0.4, p_c = -0.4*g = [-0.8,-0.8], norm≈1.13
-        let p_c_norm = 0.4 * g.norm();
+        let h = Array2::from_shape_vec((2, 2), vec![4.0, 0.0, 0.0, 1.0]).unwrap();
+        let g = Array1::from_vec(vec![2.0, 2.0]);
+        let p_c_norm = 0.4 * norm(&g);
         let p_n_norm = (0.25 + 4.0_f64).sqrt();
-        let delta = (p_c_norm + p_n_norm) / 2.0; // Between Cauchy and Newton
+        let delta = (p_c_norm + p_n_norm) / 2.0;
         let p = dogleg_step(&g, &h, delta);
-        let p_norm = p.norm();
+        let p_norm = norm(&p);
         assert!(
             (p_norm - delta).abs() < 1e-10,
-            "step norm {} should equal delta {}",
-            p_norm, delta,
+            "step norm {} should equal delta {}", p_norm, delta,
         );
     }
 
     #[test]
     fn dogleg_cholesky_failure() {
-        // Singular Hessian (not positive definite) triggers the Cholesky failure path.
-        let h = DMatrix::from_row_slice(2, 2, &[0.0, 0.0, 0.0, 0.0]);
-        let g = DVector::from_vec(vec![1.0, 1.0]);
+        let h = Array2::from_shape_vec((2, 2), vec![0.0, 0.0, 0.0, 0.0]).unwrap();
+        let g = Array1::from_vec(vec![1.0, 1.0]);
         let p = dogleg_step(&g, &h, 1.0);
-        // Should return steepest descent clipped to trust region
-        let p_norm = p.norm();
+        let p_norm = norm(&p);
         assert!(
             (p_norm - 1.0).abs() < 1e-12,
-            "step norm {} should equal delta 1.0",
-            p_norm,
+            "step norm {} should equal delta 1.0", p_norm,
         );
-        // Direction should be opposite to gradient
-        let cos_angle = p.dot(&g) / (p_norm * g.norm());
+        let cos_angle = p.dot(&g) / (p_norm * norm(&g));
         assert!(cos_angle < -0.99, "step should be opposite gradient");
     }
 
     #[test]
     fn dogleg_cholesky_failure_zero_gradient() {
-        // Singular Hessian + zero gradient: should return zero step.
-        let h = DMatrix::from_row_slice(2, 2, &[0.0, 0.0, 0.0, 0.0]);
-        let g = DVector::from_vec(vec![0.0, 0.0]);
+        let h = Array2::from_shape_vec((2, 2), vec![0.0, 0.0, 0.0, 0.0]).unwrap();
+        let g = Array1::from_vec(vec![0.0, 0.0]);
         let p = dogleg_step(&g, &h, 1.0);
-        assert!(p.norm() < 1e-15, "zero gradient should give zero step");
+        assert!(norm(&p) < 1e-15, "zero gradient should give zero step");
     }
 
     #[test]
     fn dogleg_near_zero_curvature() {
-        // gᵀHg ≈ 0 but gradient nonzero: triggers the near-zero curvature guard.
-        // Use a Hessian with extremely small eigenvalues (but still PD for Cholesky).
         let eps = 1e-40;
-        let h = DMatrix::from_row_slice(2, 2, &[eps, 0.0, 0.0, eps]);
-        let g = DVector::from_vec(vec![1.0, 1.0]);
+        let h = Array2::from_shape_vec((2, 2), vec![eps, 0.0, 0.0, eps]).unwrap();
+        let g = Array1::from_vec(vec![1.0, 1.0]);
         let delta = 0.5;
         let p = dogleg_step(&g, &h, delta);
-        // Newton step would be huge (-g/eps), so it's outside trust region.
-        // Cauchy: gᵀHg = 2*eps ≈ 0 < 1e-30 * gᵀg = 2e-30, so near-zero curvature fires.
-        let p_norm = p.norm();
+        let p_norm = norm(&p);
         assert!(
             (p_norm - delta).abs() < 1e-12,
-            "step norm {} should equal delta {}",
-            p_norm, delta,
+            "step norm {} should equal delta {}", p_norm, delta,
         );
     }
 
     #[test]
     fn trust_region_adjustment() {
-        // A system with many competing complexes and asymmetric concentrations
-        // to exercise trust region shrink/expand during iteration.
         let sys = System::new()
             .monomer("A", 1e-6)
             .monomer("B", 1e-8)
@@ -1196,7 +1237,6 @@ mod tests {
             .complex("AB2", &[("A", 1), ("B", 2)], -18.0);
         let eq = sys.equilibrium().unwrap();
 
-        // Verify mass conservation
         let a = eq.concentration("A").unwrap();
         let b = eq.concentration("B").unwrap();
         let ab = eq.concentration("AB").unwrap();
