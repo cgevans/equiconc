@@ -315,6 +315,10 @@ impl Optimizer {
         self.time_us
     }
 
+    pub fn iterations(&self) -> usize {
+        self.curr_iteration
+    }
+
     fn error(&self) -> f64 {
         let concs = self
             .polymers

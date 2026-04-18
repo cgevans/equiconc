@@ -33,3 +33,7 @@ harness = false
 [[bench]]
 name = "vs_coffee"
 harness = false
+
+[[bench]]
+name = "vs_coffee_large"
+harness = false
