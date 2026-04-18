@@ -17,7 +17,7 @@ mod coffee_vendor;
 
 use coffee_vendor::{Optimizer, OptimizerArgs};
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
-use equiconc::System;
+use equiconc::{SolverOptions, System};
 use ndarray::{Array1, Array2};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -106,19 +106,17 @@ fn load_testcase(name: &str, dir: &Path) -> TestcaseInputs {
     let mut at = Array2::zeros((n_species, n_mon));
     let mut log_q = Array1::zeros(n_species);
     let mut coffee_q_nonexp = Array1::zeros(n_species);
-    // COFFEE internally clamps q_nonexp at SMALLEST_EXP_VALUE = -230 (see
-    // `coffee/src/optimize.rs`). Apply the equivalent cap on equiconc's
-    // log_q so both solvers see the same effective physics: -ΔG/RT ≤ 230,
-    // i.e. any Keq stronger than exp(230) ≈ 10^100 is treated as
-    // 10^100-bounded.
-    const LOG_Q_MAX: f64 = 230.0;
+    // COFFEE internally clamps q_nonexp at SMALLEST_EXP_VALUE = -230.
+    // We set the same cap on equiconc via `SolverOptions::log_q_clamp`
+    // below (see `bench_equiconc`). Pass raw unclamped log_q; the
+    // library applies the clamp at construction time.
     for (i, (counts, energy)) in rows.iter().enumerate() {
         for (j, &c) in counts.iter().enumerate() {
             at[[i, j]] = c;
         }
         // ocx energy column = ΔG/RT (0 for monomers).
         // equiconc log_q = -ΔG/RT; COFFEE q_nonexp = ΔG/RT (it does exp(-)).
-        log_q[i] = (-energy).min(LOG_Q_MAX);
+        log_q[i] = -energy;
         coffee_q_nonexp[i] = *energy;
     }
 
@@ -146,10 +144,19 @@ fn bench_equiconc(bencher: &mut criterion::Bencher<'_>, tc: &TestcaseInputs) {
     // Build a fresh System per batch (allocates work buffers and seeds λ
     // = ln(c0)); the timed body is just solve(). This mirrors what
     // bench_coffee does with Optimizer::new in its setup.
+    let opts = SolverOptions {
+        log_q_clamp: Some(230.0),
+        ..Default::default()
+    };
     bencher.iter_batched(
         || {
-            System::from_arrays(tc.at.clone(), tc.log_q.clone(), tc.c0.clone())
-                .expect("from_arrays")
+            System::from_arrays_with_options(
+                tc.at.clone(),
+                tc.log_q.clone(),
+                tc.c0.clone(),
+                opts.clone(),
+            )
+            .expect("from_arrays")
         },
         |mut sys| {
             sys.solve().unwrap();

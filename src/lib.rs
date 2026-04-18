@@ -109,11 +109,6 @@ use std::ops::Index;
 /// Gas constant in kcal/(mol·K).
 pub const R: f64 = 1.987204e-3;
 
-/// Maximum log-concentration before clamping to prevent f64 overflow.
-///
-/// `exp(709.78)` ≈ `f64::MAX`; we clamp below that to stay safely in range.
-const LOG_C_MAX: f64 = 700.0;
-
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -136,6 +131,9 @@ pub enum EquilibriumError {
     /// [`System::from_arrays`] / [`System::from_arrays_with_names`]
     /// construction, or detected by [`System::validate`].
     InvalidInputs(String),
+    /// [`SolverOptions`] held an internally inconsistent combination
+    /// (e.g. non-positive tolerance, `shrink_rho >= grow_rho`).
+    InvalidOptions(String),
     ConvergenceFailure {
         iterations: usize,
         gradient_norm: f64,
@@ -168,6 +166,7 @@ impl std::fmt::Display for EquilibriumError {
                 "species name already in use: {name} (monomer and complex names must be unique)"
             ),
             Self::InvalidInputs(msg) => write!(f, "invalid inputs: {msg}"),
+            Self::InvalidOptions(msg) => write!(f, "invalid solver options: {msg}"),
             Self::ConvergenceFailure {
                 iterations,
                 gradient_norm,
@@ -180,6 +179,212 @@ impl std::fmt::Display for EquilibriumError {
 }
 
 impl std::error::Error for EquilibriumError {}
+
+// ---------------------------------------------------------------------------
+// Solver options
+// ---------------------------------------------------------------------------
+
+/// Configuration for the trust-region Newton solver.
+///
+/// Every field has a sensible default matching the solver's original
+/// hard-coded constants — `SolverOptions::default()` reproduces
+/// pre-configuration behavior bit-for-bit. Tweak individual fields to
+/// trade speed for precision, cap iteration budget, or clamp extreme
+/// inputs.
+///
+/// Attach options either at build time with
+/// [`SystemBuilder::options`] / [`SystemBuilder::with_options`] or per
+/// [`System`] via [`System::set_options`] / [`System::options_mut`].
+///
+/// # Example
+///
+/// ```
+/// use equiconc::{SolverOptions, SystemBuilder};
+///
+/// let opts = SolverOptions {
+///     max_iterations: 200,
+///     gradient_rel_tol: 1e-9,
+///     ..Default::default()
+/// };
+///
+/// let mut sys = SystemBuilder::new()
+///     .monomer("A", 1e-7)
+///     .monomer("B", 1e-7)
+///     .complex("AB", &[("A", 1), ("B", 1)], -10.0)
+///     .options(opts)
+///     .build()?;
+/// sys.solve()?;
+/// # Ok::<(), equiconc::EquilibriumError>(())
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct SolverOptions {
+    // --- Convergence -----------------------------------------------------
+    /// Maximum outer Newton iterations before the solver gives up.
+    pub max_iterations: usize,
+    /// Full-convergence gradient tolerance (absolute component).
+    ///
+    /// Convergence is declared when, for every monomer `i`,
+    /// `|g_i| < gradient_abs_tol + gradient_rel_tol · c0_i`.
+    pub gradient_abs_tol: f64,
+    /// Full-convergence gradient tolerance relative to each `c0_i`.
+    pub gradient_rel_tol: f64,
+    /// Relaxed-convergence absolute tolerance, used by the stagnation
+    /// recovery path when the objective can no longer be reduced at f64
+    /// precision.
+    pub relaxed_gradient_abs_tol: f64,
+    /// Relaxed-convergence relative tolerance.
+    pub relaxed_gradient_rel_tol: f64,
+    /// Number of consecutive non-reducing iterations before the
+    /// stagnation recovery path fires (which tries one full Newton step).
+    pub stagnation_threshold: u32,
+
+    // --- Trust region ----------------------------------------------------
+    /// Initial trust-region radius δ₀.
+    pub initial_trust_region_radius: f64,
+    /// Upper bound on δ.
+    pub max_trust_region_radius: f64,
+    /// Minimum ρ for a step to be accepted. Steps with `ρ ≤
+    /// step_accept_threshold` are rejected and `λ` is not advanced.
+    pub step_accept_threshold: f64,
+    /// ρ below which δ shrinks.
+    pub trust_region_shrink_rho: f64,
+    /// ρ above which δ may grow (when the step is on the trust-region
+    /// boundary).
+    pub trust_region_grow_rho: f64,
+    /// Factor applied to δ on shrink. Must be in (0, 1).
+    pub trust_region_shrink_scale: f64,
+    /// Factor applied to δ on grow. Must be > 1.
+    pub trust_region_grow_scale: f64,
+
+    // --- Numerical clamps ------------------------------------------------
+    /// Maximum allowed `log_q_j + (Aᵀλ)_j` before `exp()`. Entries
+    /// above this are clamped to prevent f64 overflow. Default `700.0`
+    /// sits just below `f64::MAX`; lower values introduce approximation
+    /// but never worsen stability.
+    pub log_c_clamp: f64,
+    /// Optional upper bound on `log_q = -ΔG/RT`, applied at
+    /// construction / `set_options` time (modifies the stored `log_q`).
+    /// `None` preserves the user's inputs unchanged.
+    ///
+    /// Useful when input energies have extreme magnitudes (|ΔG/RT| ≫ 100)
+    /// that would otherwise drive the linear-space dual objective into
+    /// a regime where the solver takes hundreds of bulk iterations
+    /// before refinement. A clamp at ~230 matches COFFEE's internal
+    /// behavior and keeps numerics well-scaled.
+    pub log_q_clamp: Option<f64>,
+}
+
+impl Default for SolverOptions {
+    fn default() -> Self {
+        Self {
+            max_iterations: 1000,
+            gradient_abs_tol: 1e-22,
+            gradient_rel_tol: 1e-7,
+            relaxed_gradient_abs_tol: 1e-14,
+            relaxed_gradient_rel_tol: 1e-4,
+            stagnation_threshold: 3,
+            initial_trust_region_radius: 1.0,
+            max_trust_region_radius: 1e10,
+            step_accept_threshold: 1e-4,
+            trust_region_shrink_rho: 0.25,
+            trust_region_grow_rho: 0.75,
+            trust_region_shrink_scale: 0.25,
+            trust_region_grow_scale: 2.0,
+            log_c_clamp: 700.0,
+            log_q_clamp: None,
+        }
+    }
+}
+
+impl SolverOptions {
+    /// Check internal consistency of the options.
+    ///
+    /// Returns [`EquilibriumError::InvalidOptions`] on:
+    /// - non-positive `max_iterations`;
+    /// - negative or non-finite tolerances;
+    /// - `trust_region_shrink_rho >= trust_region_grow_rho`;
+    /// - `trust_region_shrink_scale` not in (0, 1), or
+    ///   `trust_region_grow_scale <= 1`;
+    /// - non-positive `initial_trust_region_radius` or
+    ///   `max_trust_region_radius`;
+    /// - non-finite `log_c_clamp` or non-finite `log_q_clamp`.
+    ///
+    /// Does *not* reject pathological-but-legal combinations (e.g.
+    /// `gradient_rel_tol = 0.5`). Those will still run, just probably
+    /// not produce what the user wants.
+    pub fn validate(&self) -> Result<(), EquilibriumError> {
+        fn check_nonneg_finite(name: &str, v: f64) -> Result<(), EquilibriumError> {
+            if !v.is_finite() || v < 0.0 {
+                return Err(EquilibriumError::InvalidOptions(format!(
+                    "{name} = {v} (must be finite and ≥ 0)"
+                )));
+            }
+            Ok(())
+        }
+        fn check_pos_finite(name: &str, v: f64) -> Result<(), EquilibriumError> {
+            if !(v.is_finite() && v > 0.0) {
+                return Err(EquilibriumError::InvalidOptions(format!(
+                    "{name} = {v} (must be finite and > 0)"
+                )));
+            }
+            Ok(())
+        }
+
+        if self.max_iterations == 0 {
+            return Err(EquilibriumError::InvalidOptions(
+                "max_iterations = 0".into(),
+            ));
+        }
+        check_nonneg_finite("gradient_abs_tol", self.gradient_abs_tol)?;
+        check_nonneg_finite("gradient_rel_tol", self.gradient_rel_tol)?;
+        check_nonneg_finite("relaxed_gradient_abs_tol", self.relaxed_gradient_abs_tol)?;
+        check_nonneg_finite("relaxed_gradient_rel_tol", self.relaxed_gradient_rel_tol)?;
+        check_nonneg_finite("step_accept_threshold", self.step_accept_threshold)?;
+        check_pos_finite(
+            "initial_trust_region_radius",
+            self.initial_trust_region_radius,
+        )?;
+        check_pos_finite("max_trust_region_radius", self.max_trust_region_radius)?;
+        if self.initial_trust_region_radius > self.max_trust_region_radius {
+            return Err(EquilibriumError::InvalidOptions(format!(
+                "initial_trust_region_radius ({}) exceeds max_trust_region_radius ({})",
+                self.initial_trust_region_radius, self.max_trust_region_radius
+            )));
+        }
+        if !(self.trust_region_shrink_rho < self.trust_region_grow_rho) {
+            return Err(EquilibriumError::InvalidOptions(format!(
+                "trust_region_shrink_rho ({}) must be < trust_region_grow_rho ({})",
+                self.trust_region_shrink_rho, self.trust_region_grow_rho
+            )));
+        }
+        if !(self.trust_region_shrink_scale > 0.0 && self.trust_region_shrink_scale < 1.0) {
+            return Err(EquilibriumError::InvalidOptions(format!(
+                "trust_region_shrink_scale = {} (must be in (0, 1))",
+                self.trust_region_shrink_scale
+            )));
+        }
+        if !(self.trust_region_grow_scale > 1.0 && self.trust_region_grow_scale.is_finite()) {
+            return Err(EquilibriumError::InvalidOptions(format!(
+                "trust_region_grow_scale = {} (must be > 1 and finite)",
+                self.trust_region_grow_scale
+            )));
+        }
+        if !self.log_c_clamp.is_finite() {
+            return Err(EquilibriumError::InvalidOptions(format!(
+                "log_c_clamp = {} (must be finite)",
+                self.log_c_clamp
+            )));
+        }
+        if let Some(c) = self.log_q_clamp
+            && !c.is_finite()
+        {
+            return Err(EquilibriumError::InvalidOptions(format!(
+                "log_q_clamp = {c} (must be finite when Some)"
+            )));
+        }
+        Ok(())
+    }
+}
 
 // ---------------------------------------------------------------------------
 // SystemBuilder — high-level, name-based, validating
@@ -195,6 +400,7 @@ pub struct SystemBuilder {
     monomers: Vec<(String, f64)>,
     complexes: Vec<(String, Vec<(String, usize)>, f64)>,
     temperature: f64, // Kelvin
+    options: SolverOptions,
 }
 
 impl Default for SystemBuilder {
@@ -204,13 +410,15 @@ impl Default for SystemBuilder {
 }
 
 impl SystemBuilder {
-    /// Create an empty builder at 25 °C (298.15 K).
+    /// Create an empty builder at 25 °C (298.15 K) with default
+    /// [`SolverOptions`].
     #[must_use]
     pub fn new() -> Self {
         Self {
             monomers: Vec::new(),
             complexes: Vec::new(),
             temperature: 298.15,
+            options: SolverOptions::default(),
         }
     }
 
@@ -273,9 +481,24 @@ impl SystemBuilder {
         self.complexes.len()
     }
 
+    /// Replace the solver options used by the [`System`] this builder
+    /// produces.
+    #[must_use]
+    pub fn options(mut self, options: SolverOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// Read the currently-configured solver options.
+    #[must_use]
+    pub fn options_ref(&self) -> &SolverOptions {
+        &self.options
+    }
+
     /// Validate the specification, compile it to numerical form, and
     /// return a [`System`] with names attached for ergonomic lookup.
     pub fn build(self) -> Result<System, EquilibriumError> {
+        self.options.validate()?;
         let compiled = compile(&self)?;
         let species_index: HashMap<String, usize> = compiled
             .species_names
@@ -288,14 +511,26 @@ impl SystemBuilder {
             species_names: compiled.species_names,
             species_index,
         };
-        Ok(System::from_inputs(compiled.inputs, Some(names)))
+        let mut inputs = compiled.inputs;
+        apply_log_q_clamp(&mut inputs.log_q, self.options.log_q_clamp);
+        Ok(System::from_inputs(inputs, Some(names), self.options))
     }
 
     /// As [`SystemBuilder::build`], but discard names (smaller footprint,
     /// no name-indexed lookup).
     pub fn build_anonymous(self) -> Result<System, EquilibriumError> {
+        self.options.validate()?;
         let compiled = compile(&self)?;
-        Ok(System::from_inputs(compiled.inputs, None))
+        let mut inputs = compiled.inputs;
+        apply_log_q_clamp(&mut inputs.log_q, self.options.log_q_clamp);
+        Ok(System::from_inputs(inputs, None, self.options))
+    }
+}
+
+/// Helper: clamp `log_q` entries to `clamp` if `Some`. No-op if `None`.
+fn apply_log_q_clamp(log_q: &mut Array1<f64>, clamp: Option<f64>) {
+    if let Some(c) = clamp {
+        log_q.mapv_inplace(|v| v.min(c));
     }
 }
 
@@ -601,6 +836,7 @@ pub struct System {
     work: WorkBuffers,
     solution: SolutionStorage,
     names: Option<Names>,
+    options: SolverOptions,
     /// `true` when `solution` reflects the current `inputs`. Flipped off
     /// by any mutating accessor; flipped on by a successful `solve`.
     fresh: bool,
@@ -609,7 +845,11 @@ pub struct System {
 impl System {
     /// Assemble a `System` from a validated [`ProblemInputs`] and
     /// optional [`Names`]. Work buffers are allocated here.
-    fn from_inputs(inputs: ProblemInputs, names: Option<Names>) -> Self {
+    fn from_inputs(
+        inputs: ProblemInputs,
+        names: Option<Names>,
+        options: SolverOptions,
+    ) -> Self {
         let n_mon = inputs.c0.len();
         let n_species = inputs.log_q.len();
         let work = WorkBuffers::new(n_mon, n_species);
@@ -625,11 +865,13 @@ impl System {
             work,
             solution,
             names,
+            options,
             fresh: false,
         }
     }
 
-    /// Construct directly from numerical arrays.
+    /// Construct directly from numerical arrays, using default
+    /// [`SolverOptions`].
     ///
     /// `stoichiometry` is `n_species × n_mon` (Aᵀ in the solver's
     /// convention). **Required:** the first `n_mon` rows must be the
@@ -643,13 +885,27 @@ impl System {
         log_q: Array1<f64>,
         c0: Array1<f64>,
     ) -> Result<Self, EquilibriumError> {
+        Self::from_arrays_with_options(stoichiometry, log_q, c0, SolverOptions::default())
+    }
+
+    /// As [`System::from_arrays`], with custom [`SolverOptions`]. If
+    /// `options.log_q_clamp` is `Some`, the provided `log_q` is
+    /// clamped in place before storage.
+    pub fn from_arrays_with_options(
+        stoichiometry: Array2<f64>,
+        mut log_q: Array1<f64>,
+        c0: Array1<f64>,
+        options: SolverOptions,
+    ) -> Result<Self, EquilibriumError> {
+        options.validate()?;
+        apply_log_q_clamp(&mut log_q, options.log_q_clamp);
         let inputs = ProblemInputs {
             at: stoichiometry,
             log_q,
             c0,
         };
         validate_inputs(&inputs)?;
-        Ok(Self::from_inputs(inputs, None))
+        Ok(Self::from_inputs(inputs, None, options))
     }
 
     /// As [`System::from_arrays`], with names attached for ergonomic
@@ -665,6 +921,27 @@ impl System {
         monomer_names: Vec<String>,
         species_names: Vec<String>,
     ) -> Result<Self, EquilibriumError> {
+        Self::from_arrays_with_names_and_options(
+            stoichiometry,
+            log_q,
+            c0,
+            monomer_names,
+            species_names,
+            SolverOptions::default(),
+        )
+    }
+
+    /// Full low-level constructor: arrays + names + options.
+    pub fn from_arrays_with_names_and_options(
+        stoichiometry: Array2<f64>,
+        mut log_q: Array1<f64>,
+        c0: Array1<f64>,
+        monomer_names: Vec<String>,
+        species_names: Vec<String>,
+        options: SolverOptions,
+    ) -> Result<Self, EquilibriumError> {
+        options.validate()?;
+        apply_log_q_clamp(&mut log_q, options.log_q_clamp);
         let inputs = ProblemInputs {
             at: stoichiometry,
             log_q,
@@ -680,7 +957,7 @@ impl System {
             species_names,
             species_index,
         };
-        Ok(Self::from_inputs(inputs, Some(names)))
+        Ok(Self::from_inputs(inputs, Some(names), options))
     }
 
     /// Solve. Returns a borrowed view of the current solution.
@@ -689,10 +966,52 @@ impl System {
     /// solve), this returns the cached result with no recomputation.
     pub fn solve(&mut self) -> Result<Equilibrium<'_>, EquilibriumError> {
         if !self.fresh {
-            solve_inputs_into(&self.inputs, &mut self.work, &mut self.solution)?;
+            solve_inputs_into(
+                &self.inputs,
+                &mut self.work,
+                &mut self.solution,
+                &self.options,
+            )?;
             self.fresh = true;
         }
         Ok(Equilibrium { sys: self })
+    }
+
+    /// Read-only access to the current solver options.
+    #[must_use]
+    pub fn options(&self) -> &SolverOptions {
+        &self.options
+    }
+
+    /// Mutable access to the solver options. The freshness flag is
+    /// flipped off, since changes to tolerances or clamps can alter
+    /// what the next `solve()` would return, even when `inputs` are
+    /// unchanged.
+    ///
+    /// This does **not** apply `log_q_clamp` retroactively — changing
+    /// the clamp through `options_mut()` has no effect on the stored
+    /// `log_q` values. Use [`System::set_options`] if you want the
+    /// clamp re-applied.
+    pub fn options_mut(&mut self) -> &mut SolverOptions {
+        self.fresh = false;
+        &mut self.options
+    }
+
+    /// Replace the solver options in one shot.
+    ///
+    /// Validates the new options, re-applies `log_q_clamp` to the
+    /// stored `log_q` (if `Some`), and flips the freshness flag off.
+    ///
+    /// Note on clamping: re-applying a tighter clamp is destructive —
+    /// entries already clamped to a higher bound cannot be recovered.
+    /// If you need to swap between clamp settings, rebuild from source
+    /// inputs rather than toggling `log_q_clamp`.
+    pub fn set_options(&mut self, options: SolverOptions) -> Result<(), EquilibriumError> {
+        options.validate()?;
+        apply_log_q_clamp(&mut self.inputs.log_q, options.log_q_clamp);
+        self.options = options;
+        self.fresh = false;
+        Ok(())
     }
 
     /// Access the last solution, if the system is still fresh.
@@ -915,6 +1234,7 @@ fn solve_inputs_into(
     inputs: &ProblemInputs,
     work: &mut WorkBuffers,
     solution: &mut SolutionStorage,
+    options: &SolverOptions,
 ) -> Result<(), EquilibriumError> {
     let n_species = inputs.at.nrows();
     let n_mon = inputs.at.ncols();
@@ -936,6 +1256,7 @@ fn solve_inputs_into(
         &inputs.c0,
         &mut solution.lambda,
         work,
+        options,
     )?;
 
     // `work.c` holds the concentrations at `solution.lambda` after the
@@ -1062,14 +1383,15 @@ fn evaluate_into(
     c: &mut Array1<f64>,
     grad: &mut Array1<f64>,
     hessian: &mut Array2<f64>,
+    log_c_clamp: f64,
 ) -> f64 {
     let n_species = at.nrows();
     let n_mon = at.ncols();
 
-    // c = exp(min(log_q + Aᵀλ, LOG_C_MAX))
+    // c = exp(min(log_q + Aᵀλ, log_c_clamp))
     ndarray::linalg::general_mat_vec_mul(1.0, at, lambda, 0.0, c);
     *c += log_q;
-    c.mapv_inplace(|lc| lc.min(LOG_C_MAX).exp());
+    c.mapv_inplace(|lc| lc.min(log_c_clamp).exp());
 
     // f = -λᵀc⁰ + Σ_j c_j
     let f = -lambda.dot(c0) + c.sum();
@@ -1111,10 +1433,11 @@ fn evaluate_objective_into(
     c0: &Array1<f64>,
     lambda: &Array1<f64>,
     c_buf: &mut Array1<f64>,
+    log_c_clamp: f64,
 ) -> f64 {
     ndarray::linalg::general_mat_vec_mul(1.0, at, lambda, 0.0, c_buf);
     *c_buf += log_q;
-    let c_sum: f64 = c_buf.iter().map(|&lc| lc.min(LOG_C_MAX).exp()).sum();
+    let c_sum: f64 = c_buf.iter().map(|&lc| lc.min(log_c_clamp).exp()).sum();
 
     -lambda.dot(c0) + c_sum
 }
@@ -1188,14 +1511,21 @@ fn solve_dual_into(
     c0: &Array1<f64>,
     lambda: &mut Array1<f64>,
     work: &mut WorkBuffers,
+    opts: &SolverOptions,
 ) -> Result<SolverConvergence, EquilibriumError> {
-    const MAX_ITER: usize = 1000;
-    const ATOL: f64 = 1e-22;
-    const RTOL: f64 = 1e-7;
-    const ETA: f64 = 1e-4;
-    const DELTA_MAX: f64 = 1e10;
-    const STAG_ATOL: f64 = 1e-14;
-    const STAG_RTOL: f64 = 1e-4;
+    let max_iter = opts.max_iterations;
+    let atol = opts.gradient_abs_tol;
+    let rtol = opts.gradient_rel_tol;
+    let stag_atol = opts.relaxed_gradient_abs_tol;
+    let stag_rtol = opts.relaxed_gradient_rel_tol;
+    let eta = opts.step_accept_threshold;
+    let delta_max = opts.max_trust_region_radius;
+    let shrink_rho = opts.trust_region_shrink_rho;
+    let grow_rho = opts.trust_region_grow_rho;
+    let shrink_scale = opts.trust_region_shrink_scale;
+    let grow_scale = opts.trust_region_grow_scale;
+    let stag_threshold = opts.stagnation_threshold;
+    let log_c_clamp = opts.log_c_clamp;
 
     // Split-borrow the work buffers so we can pass disjoint &mut
     // references into evaluate_into alongside &lambda_new.
@@ -1206,7 +1536,7 @@ fn solve_dual_into(
         lambda_new,
     } = work;
 
-    let mut delta = 1.0;
+    let mut delta = opts.initial_trust_region_radius;
     let mut stagnation = 0u32;
 
     // Env-gated per-iteration trace (diagnostic only; zero cost when unset).
@@ -1215,8 +1545,8 @@ fn solve_dual_into(
         eprintln!("# iter\tf\tgrad_inf_norm\tdelta\tstag");
     }
 
-    for iter in 0..MAX_ITER {
-        let f = evaluate_into(at, log_q, c0, lambda, c, grad, hessian);
+    for iter in 0..max_iter {
+        let f = evaluate_into(at, log_q, c0, lambda, c, grad, hessian, log_c_clamp);
 
         if trace {
             let g_inf = grad.iter().map(|g: &f64| g.abs()).fold(0.0_f64, f64::max);
@@ -1226,7 +1556,7 @@ fn solve_dual_into(
         if grad
             .iter()
             .zip(c0.iter())
-            .all(|(&g, &cv)| g.abs() < ATOL + RTOL * cv)
+            .all(|(&g, &cv)| g.abs() < atol + rtol * cv)
         {
             return Ok(SolverConvergence::Full {
                 iterations: iter + 1,
@@ -1238,7 +1568,7 @@ fn solve_dual_into(
 
         lambda_new.assign(lambda);
         *lambda_new += &p;
-        let f_new = evaluate_objective_into(at, log_q, c0, lambda_new, c);
+        let f_new = evaluate_objective_into(at, log_q, c0, lambda_new, c, log_c_clamp);
 
         let actual_reduction = f - f_new;
         let predicted_reduction = -(grad.dot(&p) + 0.5 * p.dot(&hessian.dot(&p)));
@@ -1249,18 +1579,19 @@ fn solve_dual_into(
             stagnation = 0;
         }
 
-        if stagnation >= 3 {
-            let p_full = dogleg_step(grad, hessian, DELTA_MAX);
+        if stagnation >= stag_threshold {
+            let p_full = dogleg_step(grad, hessian, delta_max);
             lambda_new.assign(lambda);
             *lambda_new += &p_full;
-            let f_full = evaluate_into(at, log_q, c0, lambda_new, c, grad, hessian);
+            let f_full =
+                evaluate_into(at, log_q, c0, lambda_new, c, grad, hessian, log_c_clamp);
             if f_full <= f {
                 std::mem::swap(lambda, lambda_new);
 
                 if grad
                     .iter()
                     .zip(c0.iter())
-                    .all(|(&g, &cv)| g.abs() < ATOL + RTOL * cv)
+                    .all(|(&g, &cv)| g.abs() < atol + rtol * cv)
                 {
                     return Ok(SolverConvergence::Full {
                         iterations: iter + 1,
@@ -1269,7 +1600,7 @@ fn solve_dual_into(
                 if grad
                     .iter()
                     .zip(c0.iter())
-                    .all(|(&g, &cv)| g.abs() < STAG_ATOL + STAG_RTOL * cv)
+                    .all(|(&g, &cv)| g.abs() < stag_atol + stag_rtol * cv)
                 {
                     return Ok(SolverConvergence::Relaxed {
                         iterations: iter + 1,
@@ -1283,11 +1614,11 @@ fn solve_dual_into(
             }
             // Recovery failed: re-evaluate at (unchanged) lambda so that
             // grad/c buffers match.
-            evaluate_into(at, log_q, c0, lambda, c, grad, hessian);
+            evaluate_into(at, log_q, c0, lambda, c, grad, hessian, log_c_clamp);
             if grad
                 .iter()
                 .zip(c0.iter())
-                .all(|(&g, &cv)| g.abs() < STAG_ATOL + STAG_RTOL * cv)
+                .all(|(&g, &cv)| g.abs() < stag_atol + stag_rtol * cv)
             {
                 return Ok(SolverConvergence::Relaxed {
                     iterations: iter + 1,
@@ -1306,20 +1637,20 @@ fn solve_dual_into(
             actual_reduction / predicted_reduction
         };
 
-        if rho < 0.25 {
-            delta *= 0.25;
-        } else if rho > 0.75 && (p_norm - delta).abs() < 1e-10 * delta {
-            delta = (2.0 * delta).min(DELTA_MAX);
+        if rho < shrink_rho {
+            delta *= shrink_scale;
+        } else if rho > grow_rho && (p_norm - delta).abs() < 1e-10 * delta {
+            delta = (grow_scale * delta).min(delta_max);
         }
 
-        if rho > ETA {
+        if rho > eta {
             std::mem::swap(lambda, lambda_new);
         }
     }
 
-    evaluate_into(at, log_q, c0, lambda, c, grad, hessian);
+    evaluate_into(at, log_q, c0, lambda, c, grad, hessian, log_c_clamp);
     Err(EquilibriumError::ConvergenceFailure {
-        iterations: MAX_ITER,
+        iterations: max_iter,
         gradient_norm: norm(grad),
     })
 }
@@ -1623,6 +1954,10 @@ mod tests {
             (
                 EquilibriumError::InvalidInputs("mismatch".into()),
                 "invalid inputs",
+            ),
+            (
+                EquilibriumError::InvalidOptions("shrink_rho >= grow_rho".into()),
+                "invalid solver options",
             ),
             (
                 EquilibriumError::ConvergenceFailure {
@@ -2046,6 +2381,213 @@ mod tests {
         let by_name = eq["AB"];
         let by_idx = eq[2];
         assert_eq!(by_name, by_idx);
+    }
+
+    // ---------------------------------------------------------------------
+    // SolverOptions tests
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn default_options_roundtrip() {
+        let opts = SolverOptions::default();
+        assert!(opts.validate().is_ok());
+        assert_eq!(opts.max_iterations, 1000);
+        assert_eq!(opts.gradient_rel_tol, 1e-7);
+        assert_eq!(opts.log_q_clamp, None);
+    }
+
+    #[test]
+    fn validate_rejects_bad_tolerances() {
+        let mut opts = SolverOptions::default();
+        opts.gradient_rel_tol = -1.0;
+        assert!(matches!(
+            opts.validate(),
+            Err(EquilibriumError::InvalidOptions(_))
+        ));
+
+        let mut opts = SolverOptions::default();
+        opts.gradient_abs_tol = f64::NAN;
+        assert!(matches!(
+            opts.validate(),
+            Err(EquilibriumError::InvalidOptions(_))
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_bad_rho_thresholds() {
+        let mut opts = SolverOptions::default();
+        opts.trust_region_shrink_rho = 0.8;
+        opts.trust_region_grow_rho = 0.75;
+        assert!(matches!(
+            opts.validate(),
+            Err(EquilibriumError::InvalidOptions(_))
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_bad_scale_factors() {
+        let mut opts = SolverOptions::default();
+        opts.trust_region_shrink_scale = 1.5;
+        assert!(matches!(
+            opts.validate(),
+            Err(EquilibriumError::InvalidOptions(_))
+        ));
+
+        let mut opts = SolverOptions::default();
+        opts.trust_region_grow_scale = 0.9;
+        assert!(matches!(
+            opts.validate(),
+            Err(EquilibriumError::InvalidOptions(_))
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_zero_max_iterations() {
+        let mut opts = SolverOptions::default();
+        opts.max_iterations = 0;
+        assert!(matches!(
+            opts.validate(),
+            Err(EquilibriumError::InvalidOptions(_))
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_delta_ordering() {
+        let mut opts = SolverOptions::default();
+        opts.initial_trust_region_radius = 100.0;
+        opts.max_trust_region_radius = 10.0;
+        assert!(matches!(
+            opts.validate(),
+            Err(EquilibriumError::InvalidOptions(_))
+        ));
+    }
+
+    #[test]
+    fn builder_options_surfaces_invalid_at_build() {
+        let opts = SolverOptions {
+            max_iterations: 0,
+            ..Default::default()
+        };
+        let err = SystemBuilder::new()
+            .monomer("A", 1e-7)
+            .options(opts)
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, EquilibriumError::InvalidOptions(_)));
+    }
+
+    #[test]
+    fn builder_applies_log_q_clamp() {
+        // Artificial complex with huge -ΔG/RT. At the default (no clamp)
+        // log_q would be ~5000; with clamp 100 it should be capped.
+        let dg = -5000.0 * R * 298.15; // so -dg/RT = 5000
+        let builder = SystemBuilder::new()
+            .monomer("A", 1e-7)
+            .monomer("B", 1e-7)
+            .complex("AB", &[("A", 1), ("B", 1)], dg);
+        let opts = SolverOptions {
+            log_q_clamp: Some(100.0),
+            ..Default::default()
+        };
+        let sys_unclamped = builder.clone().build().unwrap();
+        let sys_clamped = builder.options(opts).build().unwrap();
+
+        let unclamped_logq = sys_unclamped.log_q()[2];
+        let clamped_logq = sys_clamped.log_q()[2];
+        assert!(unclamped_logq > 1000.0, "expected huge log_q, got {unclamped_logq}");
+        assert!((clamped_logq - 100.0).abs() < 1e-12, "clamp should cap at 100, got {clamped_logq}");
+    }
+
+    #[test]
+    fn tighter_tolerance_requires_more_iterations() {
+        // Pick a problem where the default 1e-7 tolerance completes in
+        // ~10 iterations; then tightening by 5 orders of magnitude
+        // should require at least a few more.
+        let c0 = 100e-9;
+        let dg = -10.0;
+        let builder = SystemBuilder::new()
+            .monomer("A", c0)
+            .monomer("B", c0)
+            .complex("AB", &[("A", 1), ("B", 1)], dg);
+
+        let mut default = builder.clone().build().unwrap();
+        let default_iters = default.solve().unwrap().iterations();
+
+        let tight_opts = SolverOptions {
+            gradient_rel_tol: 1e-12,
+            gradient_abs_tol: 0.0,
+            ..Default::default()
+        };
+        let mut tight = builder.options(tight_opts).build().unwrap();
+        let tight_iters = tight.solve().unwrap().iterations();
+
+        assert!(
+            tight_iters >= default_iters,
+            "tight tolerance ({tight_iters}) should take at least as many iters as default ({default_iters})"
+        );
+    }
+
+    #[test]
+    fn max_iterations_cap_fails_fast() {
+        let opts = SolverOptions {
+            max_iterations: 1,
+            ..Default::default()
+        };
+        let mut sys = SystemBuilder::new()
+            .monomer("A", 100e-9)
+            .monomer("B", 100e-9)
+            .complex("AB", &[("A", 1), ("B", 1)], -20.0)
+            .options(opts)
+            .build()
+            .unwrap();
+        let err = sys.solve().unwrap_err();
+        assert!(matches!(
+            err,
+            EquilibriumError::ConvergenceFailure { iterations: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn options_mut_invalidates_fresh() {
+        let mut sys = simple_builder().build().unwrap();
+        sys.solve().unwrap();
+        assert!(sys.last_solution().is_some());
+        let _ = sys.options_mut(); // just accessing flips freshness
+        assert!(sys.last_solution().is_none());
+    }
+
+    #[test]
+    fn set_options_reapplies_clamp() {
+        let c0 = 1e-7;
+        let dg = -5000.0 * R * 298.15; // huge log_q again
+        let mut sys = SystemBuilder::new()
+            .monomer("A", c0)
+            .monomer("B", c0)
+            .complex("AB", &[("A", 1), ("B", 1)], dg)
+            .build()
+            .unwrap();
+        // No clamp yet: log_q is huge.
+        assert!(sys.log_q()[2] > 1000.0);
+        sys.set_options(SolverOptions {
+            log_q_clamp: Some(50.0),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!((sys.log_q()[2] - 50.0).abs() < 1e-12);
+        assert!(sys.last_solution().is_none());
+    }
+
+    #[test]
+    fn from_arrays_with_options_applies_clamp() {
+        let (at, mut log_q, c0) = build_arrays_for_dimerization(100.0 * NM, -10.0, 298.15);
+        // Bump log_q[2] to something large, then clamp.
+        log_q[2] = 500.0;
+        let opts = SolverOptions {
+            log_q_clamp: Some(50.0),
+            ..Default::default()
+        };
+        let sys = System::from_arrays_with_options(at, log_q, c0, opts).unwrap();
+        assert!((sys.log_q()[2] - 50.0).abs() < 1e-12);
     }
 
     #[test]

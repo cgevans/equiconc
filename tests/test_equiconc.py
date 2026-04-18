@@ -556,3 +556,76 @@ def test_dg_st_scalar_with_ds_st_error():
         equiconc.System().monomer("A", 1e-9).complex(
             "AB", [("A", 1)], dg_st=-10.0, ds_st=-0.13
         )
+
+
+# ---------------------------------------------------------------------------
+# SolverOptions tests
+# ---------------------------------------------------------------------------
+
+
+def test_default_options():
+    opts = equiconc.SolverOptions()
+    assert opts.max_iterations == 1000
+    assert opts.gradient_rel_tol == 1e-7
+    assert opts.log_q_clamp is None
+
+
+def test_options_with_kwargs():
+    opts = equiconc.SolverOptions(max_iterations=50, gradient_rel_tol=1e-9)
+    assert opts.max_iterations == 50
+    assert opts.gradient_rel_tol == 1e-9
+
+
+def test_invalid_options_rejected():
+    with pytest.raises(ValueError, match="max_iterations"):
+        equiconc.SolverOptions(max_iterations=0)
+    with pytest.raises(ValueError, match="invalid solver options"):
+        equiconc.SolverOptions(
+            trust_region_shrink_rho=0.9, trust_region_grow_rho=0.5
+        )
+    with pytest.raises(ValueError, match="invalid solver options"):
+        equiconc.SolverOptions(gradient_rel_tol=-1.0)
+
+
+def test_options_passed_through_to_solver():
+    c0 = 100e-9
+    opts = equiconc.SolverOptions(max_iterations=1)
+    with pytest.raises(RuntimeError, match="did not converge"):
+        (
+            equiconc.System(options=opts)
+            .monomer("A", c0)
+            .monomer("B", c0)
+            .complex("AB", [("A", 1), ("B", 1)], dg_st=-20.0)
+            .equilibrium()
+        )
+
+
+def test_log_q_clamp_bounds_extreme_energy():
+    """With log_q_clamp set, even pathologically strong binding stays finite."""
+    # dg = -5000 * R * T gives log_q ≈ 5000 (way into overflow territory).
+    # Without clamp, the solver diverges; with clamp it converges.
+    R_gas = 1.987204e-3
+    dg = -5000 * R_gas * 298.15
+    opts = equiconc.SolverOptions(log_q_clamp=100.0)
+    eq = (
+        equiconc.System(options=opts)
+        .monomer("A", 100e-9)
+        .monomer("B", 100e-9)
+        .complex("AB", [("A", 1), ("B", 1)], dg_st=dg)
+        .equilibrium()
+    )
+    # Effectively all the material should end up in the complex.
+    assert eq["AB"] > 99e-9
+
+
+def test_options_are_kwargs_only():
+    # options must be keyword, per the signature.
+    with pytest.raises(TypeError):
+        equiconc.System(equiconc.SolverOptions())  # type: ignore
+
+
+def test_solver_options_repr():
+    opts = equiconc.SolverOptions(max_iterations=42)
+    r = repr(opts)
+    assert "SolverOptions" in r
+    assert "42" in r

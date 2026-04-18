@@ -16,7 +16,7 @@
 mod coffee_vendor;
 
 use coffee_vendor::{Optimizer, OptimizerArgs};
-use equiconc::System;
+use equiconc::{SolverOptions, System};
 use ndarray::{Array1, Array2};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -64,6 +64,9 @@ fn load(name: &str, dir: &Path) -> Testcase {
         for (j, &c) in counts.iter().enumerate() {
             at[[i, j]] = c;
         }
+        // Raw log_q: library applies `LOG_Q_MAX` via SolverOptions::log_q_clamp
+        // in `time_equiconc`. The diagnostic `time_phases` below uses the
+        // pre-clamped values directly so we report actual solver math.
         log_q[i] = (-energy).min(LOG_Q_MAX);
         q_nx[i] = *energy;
     }
@@ -82,8 +85,17 @@ fn load(name: &str, dir: &Path) -> Testcase {
 
 fn time_equiconc(tc: &Testcase) -> (usize, f64) {
     let t0 = Instant::now();
-    let mut sys =
-        System::from_arrays(tc.at.clone(), tc.log_q.clone(), tc.c0.clone()).expect("build");
+    let opts = SolverOptions {
+        log_q_clamp: Some(LOG_Q_MAX),
+        ..Default::default()
+    };
+    let mut sys = System::from_arrays_with_options(
+        tc.at.clone(),
+        tc.log_q.clone(),
+        tc.c0.clone(),
+        opts,
+    )
+    .expect("build");
     let eq = sys.solve().expect("solve");
     let elapsed = t0.elapsed().as_secs_f64();
     let iters = eq.iterations();

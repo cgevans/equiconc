@@ -3,7 +3,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::collections::HashMap;
 
-use crate::{Equilibrium, EquilibriumError};
+use crate::{Equilibrium, EquilibriumError, SolverOptions};
 
 // ---------------------------------------------------------------------------
 // Error mapping
@@ -95,6 +95,133 @@ fn resolve_energy_spec(
 }
 
 // ---------------------------------------------------------------------------
+// PySolverOptions — wrapper around the Rust SolverOptions struct
+// ---------------------------------------------------------------------------
+
+/// Solver configuration: tolerances, iteration caps, trust-region
+/// parameters, and numerical clamps.
+///
+/// All fields have sensible defaults matching the built-in solver
+/// behavior. Construct with keyword arguments and pass to
+/// ``System(options=...)``.
+///
+/// Parameters
+/// ----------
+/// max_iterations : int, optional
+///     Maximum outer Newton iterations (default: 1000).
+/// gradient_abs_tol, gradient_rel_tol : float, optional
+///     Full-convergence gradient tolerances (default: 1e-22, 1e-7).
+/// relaxed_gradient_abs_tol, relaxed_gradient_rel_tol : float, optional
+///     Relaxed tolerances used by the stagnation recovery path
+///     (default: 1e-14, 1e-4).
+/// stagnation_threshold : int, optional
+///     Consecutive non-reducing iterations before stagnation recovery
+///     fires (default: 3).
+/// initial_trust_region_radius, max_trust_region_radius : float, optional
+///     Trust-region radius bounds (default: 1.0, 1e10).
+/// step_accept_threshold : float, optional
+///     Minimum ρ for a step to be accepted (default: 1e-4).
+/// trust_region_shrink_rho, trust_region_grow_rho : float, optional
+///     ρ thresholds for shrinking / growing the trust region
+///     (default: 0.25, 0.75).
+/// trust_region_shrink_scale, trust_region_grow_scale : float, optional
+///     Multipliers applied to δ on shrink / grow (default: 0.25, 2.0).
+/// log_c_clamp : float, optional
+///     Upper bound on ``log_q + Aᵀλ`` before exp() (default: 700.0).
+/// log_q_clamp : float or None, optional
+///     Optional upper bound on ``log_q = -ΔG/RT`` applied at
+///     construction time (default: None).
+#[pyclass(name = "SolverOptions", module = "equiconc", from_py_object)]
+#[derive(Clone)]
+struct PySolverOptions {
+    inner: SolverOptions,
+}
+
+#[pymethods]
+impl PySolverOptions {
+    #[new]
+    #[pyo3(signature = (
+        *,
+        max_iterations=None,
+        gradient_abs_tol=None,
+        gradient_rel_tol=None,
+        relaxed_gradient_abs_tol=None,
+        relaxed_gradient_rel_tol=None,
+        stagnation_threshold=None,
+        initial_trust_region_radius=None,
+        max_trust_region_radius=None,
+        step_accept_threshold=None,
+        trust_region_shrink_rho=None,
+        trust_region_grow_rho=None,
+        trust_region_shrink_scale=None,
+        trust_region_grow_scale=None,
+        log_c_clamp=None,
+        log_q_clamp=None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        max_iterations: Option<usize>,
+        gradient_abs_tol: Option<f64>,
+        gradient_rel_tol: Option<f64>,
+        relaxed_gradient_abs_tol: Option<f64>,
+        relaxed_gradient_rel_tol: Option<f64>,
+        stagnation_threshold: Option<u32>,
+        initial_trust_region_radius: Option<f64>,
+        max_trust_region_radius: Option<f64>,
+        step_accept_threshold: Option<f64>,
+        trust_region_shrink_rho: Option<f64>,
+        trust_region_grow_rho: Option<f64>,
+        trust_region_shrink_scale: Option<f64>,
+        trust_region_grow_scale: Option<f64>,
+        log_c_clamp: Option<f64>,
+        log_q_clamp: Option<f64>,
+    ) -> PyResult<Self> {
+        let mut opts = SolverOptions::default();
+        if let Some(v) = max_iterations { opts.max_iterations = v; }
+        if let Some(v) = gradient_abs_tol { opts.gradient_abs_tol = v; }
+        if let Some(v) = gradient_rel_tol { opts.gradient_rel_tol = v; }
+        if let Some(v) = relaxed_gradient_abs_tol { opts.relaxed_gradient_abs_tol = v; }
+        if let Some(v) = relaxed_gradient_rel_tol { opts.relaxed_gradient_rel_tol = v; }
+        if let Some(v) = stagnation_threshold { opts.stagnation_threshold = v; }
+        if let Some(v) = initial_trust_region_radius { opts.initial_trust_region_radius = v; }
+        if let Some(v) = max_trust_region_radius { opts.max_trust_region_radius = v; }
+        if let Some(v) = step_accept_threshold { opts.step_accept_threshold = v; }
+        if let Some(v) = trust_region_shrink_rho { opts.trust_region_shrink_rho = v; }
+        if let Some(v) = trust_region_grow_rho { opts.trust_region_grow_rho = v; }
+        if let Some(v) = trust_region_shrink_scale { opts.trust_region_shrink_scale = v; }
+        if let Some(v) = trust_region_grow_scale { opts.trust_region_grow_scale = v; }
+        if let Some(v) = log_c_clamp { opts.log_c_clamp = v; }
+        // log_q_clamp: None from Python means "unset"; we store None
+        // internally too since Python cannot distinguish "not passed"
+        // from "passed as None" in this pyo3 form.
+        opts.log_q_clamp = log_q_clamp;
+        opts.validate().map_err(map_err)?;
+        Ok(PySolverOptions { inner: opts })
+    }
+
+    // Getters for every field (so Python users can inspect).
+    #[getter] fn max_iterations(&self) -> usize { self.inner.max_iterations }
+    #[getter] fn gradient_abs_tol(&self) -> f64 { self.inner.gradient_abs_tol }
+    #[getter] fn gradient_rel_tol(&self) -> f64 { self.inner.gradient_rel_tol }
+    #[getter] fn relaxed_gradient_abs_tol(&self) -> f64 { self.inner.relaxed_gradient_abs_tol }
+    #[getter] fn relaxed_gradient_rel_tol(&self) -> f64 { self.inner.relaxed_gradient_rel_tol }
+    #[getter] fn stagnation_threshold(&self) -> u32 { self.inner.stagnation_threshold }
+    #[getter] fn initial_trust_region_radius(&self) -> f64 { self.inner.initial_trust_region_radius }
+    #[getter] fn max_trust_region_radius(&self) -> f64 { self.inner.max_trust_region_radius }
+    #[getter] fn step_accept_threshold(&self) -> f64 { self.inner.step_accept_threshold }
+    #[getter] fn trust_region_shrink_rho(&self) -> f64 { self.inner.trust_region_shrink_rho }
+    #[getter] fn trust_region_grow_rho(&self) -> f64 { self.inner.trust_region_grow_rho }
+    #[getter] fn trust_region_shrink_scale(&self) -> f64 { self.inner.trust_region_shrink_scale }
+    #[getter] fn trust_region_grow_scale(&self) -> f64 { self.inner.trust_region_grow_scale }
+    #[getter] fn log_c_clamp(&self) -> f64 { self.inner.log_c_clamp }
+    #[getter] fn log_q_clamp(&self) -> Option<f64> { self.inner.log_q_clamp }
+
+    fn __repr__(&self) -> String {
+        format!("SolverOptions({:?})", self.inner)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PySystem — deferred-construction wrapper
 // ---------------------------------------------------------------------------
 
@@ -125,14 +252,19 @@ struct PySystem {
     temperature_k: Option<f64>,
     monomers: Vec<(String, f64)>,
     complexes: Vec<(String, Vec<(String, usize)>, EnergySpec)>,
+    options: SolverOptions,
 }
 
 #[pymethods]
 #[allow(non_snake_case)]
 impl PySystem {
     #[new]
-    #[pyo3(signature = (*, temperature_C=None, temperature_K=None))]
-    fn new(temperature_C: Option<f64>, temperature_K: Option<f64>) -> PyResult<Self> {
+    #[pyo3(signature = (*, temperature_C=None, temperature_K=None, options=None))]
+    fn new(
+        temperature_C: Option<f64>,
+        temperature_K: Option<f64>,
+        options: Option<PySolverOptions>,
+    ) -> PyResult<Self> {
         let temp_k = match (temperature_C, temperature_K) {
             (None, None) => None,
             (Some(c), None) => Some(c + 273.15),
@@ -143,10 +275,12 @@ impl PySystem {
                 ))
             }
         };
+        let options = options.map(|o| o.inner).unwrap_or_default();
         Ok(PySystem {
             temperature_k: temp_k,
             monomers: Vec::new(),
             complexes: Vec::new(),
+            options,
         })
     }
 
@@ -265,7 +399,7 @@ impl PySystem {
             builder = builder.complex(name, &comp_refs, dg);
         }
 
-        let mut sys = builder.build().map_err(map_err)?;
+        let mut sys = builder.options(self.options.clone()).build().map_err(map_err)?;
         let n_mon = sys.n_monomers();
         let n_species = sys.n_species();
         let monomer_names: Vec<String> = (0..n_mon)
@@ -538,5 +672,6 @@ impl EquilibriumKeyIter {
 fn equiconc(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySystem>()?;
     m.add_class::<PyEquilibrium>()?;
+    m.add_class::<PySolverOptions>()?;
     Ok(())
 }

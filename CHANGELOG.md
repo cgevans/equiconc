@@ -22,6 +22,24 @@
 
 ### Added
 
+- `SolverOptions` struct exposing previously-hard-coded solver knobs:
+  `max_iterations`, gradient tolerances (full + relaxed), trust-region
+  parameters (initial / max δ, ρ thresholds, shrink / grow scale
+  factors), stagnation threshold, and two numerical clamps
+  (`log_c_clamp`, optional `log_q_clamp`). Every field has a default
+  matching the previous constant, so `SolverOptions::default()`
+  reproduces pre-configuration behavior bit-for-bit.
+- `SystemBuilder::options` / `options_ref`, `System::options` /
+  `options_mut` / `set_options`, plus
+  `System::from_arrays_with_options` and
+  `System::from_arrays_with_names_and_options` for passing options
+  directly alongside numerical inputs.
+- `EquilibriumError::InvalidOptions` variant, raised by
+  `SolverOptions::validate()` on inconsistent combinations
+  (non-positive tolerances, `shrink_rho >= grow_rho`, etc.) and
+  surfaced by every constructor that accepts options.
+- Python `equiconc.SolverOptions` class with keyword-only constructor
+  mirroring the Rust fields. Pass to `System(options=opts)`.
 - `System::from_arrays` and `System::from_arrays_with_names` for constructing
   a solver directly from numerical inputs without going through the
   string-keyed builder. Temperature is not stored at this level — callers
