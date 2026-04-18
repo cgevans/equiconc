@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-18
+
 ### Changed
 
 - **BREAKING**: Renamed the Rust `System` builder type to `SystemBuilder`. The
