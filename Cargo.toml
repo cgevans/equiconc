@@ -26,7 +26,7 @@ exclude = [
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-ndarray = "0.16"
+ndarray = "0.17"
 pyo3 = { version = "0.28", optional = true, features = ["extension-module", "abi3-py310"] }
 
 [dev-dependencies]

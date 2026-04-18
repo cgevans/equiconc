@@ -193,7 +193,7 @@ impl std::error::Error for EquilibriumError {}
 /// inputs.
 ///
 /// Attach options either at build time with
-/// [`SystemBuilder::options`] / [`SystemBuilder::with_options`] or per
+/// [`SystemBuilder::options`] / [`SystemBuilder::options_ref`] or per
 /// [`System`] via [`System::set_options`] / [`System::options_mut`].
 ///
 /// # Example

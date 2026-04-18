@@ -19,6 +19,9 @@
   `Equilibrium` view is alive.
 - Duplicate monomers in a complex composition now have their counts summed
   instead of raising an error.
+- **BREAKING** (Rust): bumped `ndarray` from 0.16 to 0.17. Downstream crates
+  consuming equiconc's `ArrayView{1,2}` / `Array{1,2}`-valued API must upgrade
+  ndarray in lockstep.
 
 ### Added
 
