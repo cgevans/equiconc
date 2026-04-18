@@ -7,8 +7,8 @@
 mod coffee_vendor;
 
 use coffee_vendor::{Optimizer, OptimizerArgs};
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use equiconc::{System, R};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
+use equiconc::{SystemBuilder, R};
 use ndarray::{Array1, Array2};
 
 const TEMP_K: f64 = 298.15;
@@ -17,7 +17,7 @@ const C0: f64 = 100e-9; // 100 nM
 
 /// A pre-built system in both equiconc and COFFEE formats.
 struct DualSystem {
-    equiconc: System,
+    equiconc: SystemBuilder,
     // COFFEE inputs (scalarity=false)
     coffee_monomers: Array1<f64>,
     coffee_polymers: Array2<f64>,
@@ -32,9 +32,9 @@ fn build_system(n_mon: usize, n_cplx: usize) -> DualSystem {
     let names: Vec<String> = (0..n_mon).map(|i| format!("S{i}")).collect();
     let n_species = n_mon + n_cplx;
 
-    let mut sys = System::new().temperature(TEMP_K);
+    let mut builder = SystemBuilder::new().temperature(TEMP_K);
     for name in &names {
-        sys = sys.monomer(name, C0);
+        builder = builder.monomer(name, C0);
     }
 
     let mut coffee_polymers = Array2::zeros((n_species, n_mon));
@@ -59,7 +59,7 @@ fn build_system(n_mon: usize, n_cplx: usize) -> DualSystem {
         } else {
             vec![(&names[i] as &str, 1), (&names[j] as &str, 1)]
         };
-        sys = sys.complex(&format!("c{k}"), &comp, dg);
+        builder = builder.complex(&format!("c{k}"), &comp, dg);
 
         // COFFEE matrix row
         if i == j {
@@ -74,26 +74,52 @@ fn build_system(n_mon: usize, n_cplx: usize) -> DualSystem {
     let coffee_monomers = Array1::from_vec(vec![C0; n_mon]);
 
     DualSystem {
-        equiconc: sys,
+        equiconc: builder,
         coffee_monomers,
         coffee_polymers,
         coffee_q_nonexp,
     }
 }
 
-fn solve_equiconc(sys: &System) {
-    sys.equilibrium().unwrap();
-}
-
-fn solve_coffee(monomers: &Array1<f64>, polymers: &Array2<f64>, q_nonexp: &Array1<f64>) {
-    let args = OptimizerArgs {
+fn coffee_args() -> OptimizerArgs {
+    OptimizerArgs {
         scalarity: false,
         use_terminal: false,
         verbose: false,
         ..OptimizerArgs::default()
-    };
-    let mut opt = Optimizer::new(monomers, polymers, q_nonexp, &args).unwrap();
-    opt.optimize(1.0).unwrap();
+    }
+}
+
+/// Bench the equiconc solver alone: setup (clone the builder and validate
+/// + compile it into a `System`) is hoisted into `iter_batched`'s setup
+/// closure and is excluded from the measurement. Only `solve()` is timed.
+fn bench_equiconc(
+    bencher: &mut criterion::Bencher<'_>,
+    builder: &SystemBuilder,
+) {
+    bencher.iter_batched(
+        || builder.clone().build().unwrap(),
+        |mut sys| {
+            sys.solve().unwrap();
+        },
+        BatchSize::SmallInput,
+    );
+}
+
+/// Bench the COFFEE solver alone: `Optimizer::new` is in setup; only
+/// `optimize` is timed.
+fn bench_coffee(
+    bencher: &mut criterion::Bencher<'_>,
+    monomers: &Array1<f64>,
+    polymers: &Array2<f64>,
+    q_nonexp: &Array1<f64>,
+) {
+    let args = coffee_args();
+    bencher.iter_batched(
+        || Optimizer::new(monomers, polymers, q_nonexp, &args).unwrap(),
+        |mut opt| opt.optimize(1.0).unwrap(),
+        BatchSize::SmallInput,
+    );
 }
 
 /// Benchmark scaling with number of monomers (all-pairs dimers).
@@ -107,11 +133,11 @@ fn bench_monomer_scaling(c: &mut Criterion) {
         let label = format!("m{n_mon}_n{n_cplx}");
         group.bench_with_input(
             BenchmarkId::new("equiconc", &label), &ds,
-            |b, ds| b.iter(|| solve_equiconc(&ds.equiconc)),
+            |b, ds| bench_equiconc(b, &ds.equiconc),
         );
         group.bench_with_input(
             BenchmarkId::new("coffee", &label), &ds,
-            |b, ds| b.iter(|| solve_coffee(&ds.coffee_monomers, &ds.coffee_polymers, &ds.coffee_q_nonexp)),
+            |b, ds| bench_coffee(b, &ds.coffee_monomers, &ds.coffee_polymers, &ds.coffee_q_nonexp),
         );
     }
     group.finish();
@@ -127,11 +153,11 @@ fn bench_complex_scaling(c: &mut Criterion) {
         let label = format!("n{n_cplx}");
         group.bench_with_input(
             BenchmarkId::new("equiconc", &label), &ds,
-            |b, ds| b.iter(|| solve_equiconc(&ds.equiconc)),
+            |b, ds| bench_equiconc(b, &ds.equiconc),
         );
         group.bench_with_input(
             BenchmarkId::new("coffee", &label), &ds,
-            |b, ds| b.iter(|| solve_coffee(&ds.coffee_monomers, &ds.coffee_polymers, &ds.coffee_q_nonexp)),
+            |b, ds| bench_coffee(b, &ds.coffee_monomers, &ds.coffee_polymers, &ds.coffee_q_nonexp),
         );
     }
     group.finish();
@@ -147,11 +173,11 @@ fn bench_large_scale(c: &mut Criterion) {
         let label = format!("n{n_cplx}");
         group.bench_with_input(
             BenchmarkId::new("equiconc", &label), &ds,
-            |b, ds| b.iter(|| solve_equiconc(&ds.equiconc)),
+            |b, ds| bench_equiconc(b, &ds.equiconc),
         );
         group.bench_with_input(
             BenchmarkId::new("coffee", &label), &ds,
-            |b, ds| b.iter(|| solve_coffee(&ds.coffee_monomers, &ds.coffee_polymers, &ds.coffee_q_nonexp)),
+            |b, ds| bench_coffee(b, &ds.coffee_monomers, &ds.coffee_polymers, &ds.coffee_q_nonexp),
         );
     }
     group.finish();

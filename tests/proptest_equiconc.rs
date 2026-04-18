@@ -1,4 +1,4 @@
-use equiconc::{System, R};
+use equiconc::{SystemBuilder, R};
 use proptest::prelude::*;
 
 const MONOMER_NAMES: [&str; 4] = ["A", "B", "C", "D"];
@@ -16,16 +16,16 @@ struct SystemSpec {
 }
 
 impl SystemSpec {
-    fn solve(&self) -> Result<equiconc::Equilibrium, equiconc::EquilibriumError> {
-        let mut sys = System::new().temperature(self.temperature);
+    fn build(&self) -> Result<equiconc::System, equiconc::EquilibriumError> {
+        let mut b = SystemBuilder::new().temperature(self.temperature);
         for &(name, conc) in &self.monomers {
-            sys = sys.monomer(name, conc);
+            b = b.monomer(name, conc);
         }
         for (name, comp, dg) in &self.complexes {
             let comp_refs: Vec<(&str, usize)> = comp.iter().copied().collect();
-            sys = sys.complex(name, &comp_refs, *dg);
+            b = b.complex(name, &comp_refs, *dg);
         }
-        sys.equilibrium()
+        b.build()
     }
 }
 
@@ -101,18 +101,20 @@ fn arb_monomer_only() -> impl Strategy<Value = SystemSpec> {
 proptest! {
     #[test]
     fn prop_convergence(spec in arb_system()) {
-        prop_assert!(spec.solve().is_ok(), "solver failed for {:?}", spec);
+        let mut sys = spec.build().unwrap();
+        prop_assert!(sys.solve().is_ok(), "solver failed for {:?}", spec);
     }
 
     #[test]
     fn prop_mass_conservation(spec in arb_system()) {
-        let eq = spec.solve().unwrap();
+        let mut sys = spec.build().unwrap();
+        let eq = sys.solve().unwrap();
         for &(mon_name, c0) in &spec.monomers {
-            let mut total = eq.concentration(mon_name).unwrap();
+            let mut total = eq.get(mon_name).unwrap();
             for (cplx_name, comp, _) in &spec.complexes {
                 for &(n, count) in comp {
                     if n == mon_name {
-                        total += count as f64 * eq.concentration(cplx_name).unwrap();
+                        total += count as f64 * eq.get(cplx_name).unwrap();
                     }
                 }
             }
@@ -128,16 +130,17 @@ proptest! {
 
     #[test]
     fn prop_equilibrium_condition(spec in arb_system()) {
-        let eq = spec.solve().unwrap();
+        let mut sys = spec.build().unwrap();
+        let eq = sys.solve().unwrap();
         let rt = R * spec.temperature;
         for (cplx_name, comp, dg) in &spec.complexes {
-            let actual = eq.concentration(cplx_name).unwrap();
+            let actual = eq.get(cplx_name).unwrap();
             // Compare in log-space to avoid underflow when concentrations
             // are effectively zero (e.g. strong binding depleting monomers).
             let log_actual = actual.ln();
             let mut log_expected = -dg / rt;
             for &(mon_name, count) in comp {
-                log_expected += count as f64 * eq.concentration(mon_name).unwrap().ln();
+                log_expected += count as f64 * eq.get(mon_name).unwrap().ln();
             }
             let log_err = (log_actual - log_expected).abs();
             // Scale tolerance with magnitude: larger exponents allow
@@ -153,22 +156,24 @@ proptest! {
 
     #[test]
     fn prop_concentrations_non_negative(spec in arb_system()) {
-        let eq = spec.solve().unwrap();
+        let mut sys = spec.build().unwrap();
+        let eq = sys.solve().unwrap();
         for &(name, _) in &spec.monomers {
-            let c = eq.concentration(name).unwrap();
+            let c = eq.get(name).unwrap();
             prop_assert!(c >= 0.0, "negative concentration for {}: {}", name, c);
         }
         for (name, _, _) in &spec.complexes {
-            let c = eq.concentration(name).unwrap();
+            let c = eq.get(name).unwrap();
             prop_assert!(c >= 0.0, "negative concentration for {}: {}", name, c);
         }
     }
 
     #[test]
     fn prop_monomer_only_identity(spec in arb_monomer_only()) {
-        let eq = spec.solve().unwrap();
+        let mut sys = spec.build().unwrap();
+        let eq = sys.solve().unwrap();
         for &(name, c0) in &spec.monomers {
-            let c = eq.concentration(name).unwrap();
+            let c = eq.get(name).unwrap();
             prop_assert!(
                 (c - c0).abs() < 1e-15 * c0,
                 "monomer-only: {} = {} (expected {})", name, c, c0
@@ -184,12 +189,14 @@ proptest! {
             293.15..=373.15f64,
         )
     ) {
-        let sys = System::new()
+        let mut sys = SystemBuilder::new()
             .temperature(temp)
             .monomer("A", c0)
             .monomer("B", c0)
-            .complex("AB", &[("A", 1), ("B", 1)], dg);
-        let eq = sys.equilibrium().unwrap();
+            .complex("AB", &[("A", 1), ("B", 1)], dg)
+            .build()
+            .unwrap();
+        let eq = sys.solve().unwrap();
 
         let rt = R * temp;
         let k = (-dg / rt).exp();
@@ -198,9 +205,9 @@ proptest! {
         let free = 2.0 * c0 / (disc + 1.0);
         let x = k * free * free;
 
-        let a_conc = eq.concentration("A").unwrap();
-        let b_conc = eq.concentration("B").unwrap();
-        let ab_conc = eq.concentration("AB").unwrap();
+        let a_conc = eq.get("A").unwrap();
+        let b_conc = eq.get("B").unwrap();
+        let ab_conc = eq.get("AB").unwrap();
 
         // Combined absolute + relative tolerance: at picomolar
         // concentrations, ATOL dominates and some species (free monomer

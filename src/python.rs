@@ -247,10 +247,10 @@ impl PySystem {
         // Default to 25 °C if no temperature was given.
         let temp_k = self.temperature_k.unwrap_or(298.15);
 
-        let mut sys = crate::System::new().temperature(temp_k);
+        let mut builder = crate::SystemBuilder::new().temperature(temp_k);
 
         for (name, conc) in &self.monomers {
-            sys = sys.monomer(name, *conc);
+            builder = builder.monomer(name, *conc);
         }
 
         let rt = crate::R * temp_k;
@@ -262,11 +262,25 @@ impl PySystem {
             };
             let comp_refs: Vec<(&str, usize)> =
                 comp.iter().map(|(n, c)| (n.as_str(), *c)).collect();
-            sys = sys.complex(name, &comp_refs, dg);
+            builder = builder.complex(name, &comp_refs, dg);
         }
 
-        let eq = sys.equilibrium().map_err(map_err)?;
-        Ok(PyEquilibrium::from_equilibrium(eq))
+        let mut sys = builder.build().map_err(map_err)?;
+        let n_mon = sys.n_monomers();
+        let n_species = sys.n_species();
+        let monomer_names: Vec<String> = (0..n_mon)
+            .map(|i| sys.monomer_name(i).unwrap_or_default().to_string())
+            .collect();
+        let complex_names: Vec<String> = (n_mon..n_species)
+            .map(|i| sys.species_name(i).unwrap_or_default().to_string())
+            .collect();
+
+        let eq = sys.solve().map_err(map_err)?;
+        Ok(PyEquilibrium::from_equilibrium(
+            monomer_names,
+            complex_names,
+            &eq,
+        ))
     }
 
     fn __repr__(&self) -> String {
@@ -312,22 +326,30 @@ struct PyEquilibrium {
 }
 
 impl PyEquilibrium {
-    fn from_equilibrium(eq: Equilibrium) -> Self {
-        let mut concentrations = HashMap::new();
-        for (name, &conc) in eq.monomer_names().iter().zip(eq.free_monomer_concentrations()) {
+    fn from_equilibrium(
+        monomer_names: Vec<String>,
+        complex_names: Vec<String>,
+        eq: &Equilibrium<'_>,
+    ) -> Self {
+        let free_monomer_concentrations: Vec<f64> = eq.free_monomers().to_vec();
+        let complex_concentrations: Vec<f64> = eq.complexes().to_vec();
+
+        let mut concentrations =
+            HashMap::with_capacity(monomer_names.len() + complex_names.len());
+        for (name, &conc) in monomer_names.iter().zip(&free_monomer_concentrations) {
             concentrations.insert(name.clone(), conc);
         }
-        for (name, &conc) in eq.complex_names().iter().zip(eq.complex_concentrations()) {
+        for (name, &conc) in complex_names.iter().zip(&complex_concentrations) {
             concentrations.insert(name.clone(), conc);
         }
-        let converged_fully = eq.converged_fully();
+
         PyEquilibrium {
             concentrations,
-            monomer_names: eq.monomer_names().to_vec(),
-            complex_names: eq.complex_names().to_vec(),
-            free_monomer_concentrations: eq.free_monomer_concentrations().to_vec(),
-            complex_concentrations: eq.complex_concentrations().to_vec(),
-            converged_fully,
+            monomer_names,
+            complex_names,
+            free_monomer_concentrations,
+            complex_concentrations,
+            converged_fully: eq.converged_fully(),
         }
     }
 

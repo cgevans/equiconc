@@ -7,7 +7,7 @@
 
 mod coffee_vendor;
 
-use equiconc::{System, R};
+use equiconc::{SystemBuilder, R};
 use ndarray::{Array1, Array2};
 use proptest::prelude::*;
 
@@ -34,16 +34,16 @@ struct SystemSpec {
 }
 
 impl SystemSpec {
-    fn solve(&self) -> Result<equiconc::Equilibrium, equiconc::EquilibriumError> {
-        let mut sys = System::new().temperature(self.temperature);
+    fn build(&self) -> Result<equiconc::System, equiconc::EquilibriumError> {
+        let mut b = SystemBuilder::new().temperature(self.temperature);
         for &(name, conc) in &self.monomers {
-            sys = sys.monomer(name, conc);
+            b = b.monomer(name, conc);
         }
         for (name, comp, dg) in &self.complexes {
             let comp_refs: Vec<(&str, usize)> = comp.iter().copied().collect();
-            sys = sys.complex(name, &comp_refs, *dg);
+            b = b.complex(name, &comp_refs, *dg);
         }
-        sys.equilibrium()
+        b.build()
     }
 }
 
@@ -180,7 +180,8 @@ proptest! {
     fn prop_equiconc_matches_coffee(spec in arb_system()) {
         prop_assume!(!spec.complexes.is_empty());
 
-        let eq = spec.solve().unwrap();
+        let mut sys = spec.build().unwrap();
+        let eq = sys.solve().unwrap();
 
         let coffee_concs = match solve_with_coffee(&spec) {
             Some(c) => c,
@@ -196,7 +197,7 @@ proptest! {
 
         // Compare free monomer concentrations
         for (i, &(name, _)) in spec.monomers.iter().enumerate() {
-            let eq_val = eq.concentration(name).unwrap();
+            let eq_val = eq.get(name).unwrap();
             let coffee_val = coffee_concs[i];
             prop_assert!(
                 concentrations_agree(eq_val, coffee_val),
@@ -211,7 +212,7 @@ proptest! {
 
         // Compare complex concentrations
         for (k, (name, _, _)) in spec.complexes.iter().enumerate() {
-            let eq_val = eq.concentration(name).unwrap();
+            let eq_val = eq.get(name).unwrap();
             let coffee_val = coffee_concs[n_mon + k];
             prop_assert!(
                 concentrations_agree(eq_val, coffee_val),
