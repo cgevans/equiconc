@@ -13,3 +13,8 @@ site/
 docs/notebooks/*.md
 docs/notebooks/*_files/
 .hypothesis/
+
+# Local dev notes / writeups not tracked in this repo
+/coffee-bugs.md
+/coffee-bugs.pdf
+/coffee-scalarity.md

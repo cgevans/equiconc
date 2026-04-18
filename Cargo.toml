@@ -3,13 +3,24 @@ name = "equiconc"
 version = "0.1.0"
 edition = "2024"
 description = "Equilibrium concentration solver"
-license = "BSD-3-Clause"
+license = "BSD-3-Clause AND Apache-2.0"
 repository = "https://github.com/cgevans/equiconc"
 documentation = "https://cgevans.github.io/equiconc"
 authors = ["Constantine Evans <equiconc@mb.costi.net>"]
 keywords = ["equilibrium", "nucleic-acid", "thermodynamics", "DNA", "RNA"]
 categories = ["science"]
 readme = "README.md"
+exclude = [
+    ".claude/",
+    "CLAUDE.md",
+    "analysis-*.md",
+    "coffee.pdf",
+    "coffee-*.md",
+    "coffee-*.pdf",
+    "config-research.md",
+    "lower-level-*.md",
+    "nupack-*.whl",
+]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
