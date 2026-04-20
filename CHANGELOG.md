@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reverted the crate `license` field from `"BSD-3-Clause AND Apache-2.0"` back
+  to `"BSD-3-Clause"`. The dual declaration existed only because of the
+  vendored COFFEE sources; with vendoring removed, the published crate
+  contains no Apache-2.0-licensed code.
+- Comparative benchmarks, the `proptest_vs_coffee` cross-validation test, and
+  the `instrument_large` / `instrument_xl` diagnostic examples now depend on
+  the `coffee` crate as a pinned git dev-dependency (via the `cgevans/coffee`
+  fork, which gates the polars-backed file-input path behind a feature) with
+  `default-features = false`, instead of carrying a vendored copy under
+  `tests/coffee_vendor/`. These are all dev-only consumers, so the git source
+  doesn't affect the published crate. Because COFFEE still pins
+  `ndarray = 0.16` while equiconc is on 0.17, an aliased
+  `ndarray_coffee = { package = "ndarray", version = "0.16" }` dev-dep
+  supplies the array types COFFEE's API requires.
+- `instrument_large` / `instrument_xl` no longer report a COFFEE iteration
+  count (upstream's `Optimizer` doesn't expose one); wall time only.
+
 ## [0.2.0] - 2026-04-18
 
 ### Changed

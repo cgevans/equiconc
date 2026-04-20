@@ -1,17 +1,15 @@
-//! Cross-validate equiconc against the vendored COFFEE optimizer.
+//! Cross-validate equiconc against the upstream COFFEE optimizer.
 //!
 //! Both implement the Dirks et al. (2007) trust-region Newton method on the
 //! convex dual problem, but with different subproblem solvers (dog-leg vs
 //! Steihaug CG). For valid inputs they must converge to the same unique
 //! optimum, so their equilibrium concentrations should agree to high precision.
 
-mod coffee_vendor;
-
+use coffee::{extras::OptimizerArgs, optimize::Optimizer};
 use equiconc::{SystemBuilder, R};
-use ndarray::{Array1, Array2};
+// COFFEE's public API takes ndarray 0.16 types; equiconc is on 0.17.
+use ndarray_coffee::{Array1, Array2};
 use proptest::prelude::*;
-
-use coffee_vendor::{Optimizer, OptimizerArgs};
 
 // Cross-validation tolerances. COFFEE's convergence criterion
 // (actual_reduction == 0.0, exact float equality) is looser than equiconc's

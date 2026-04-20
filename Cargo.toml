@@ -3,7 +3,7 @@ name = "equiconc"
 version = "0.2.0"
 edition = "2024"
 description = "Equilibrium concentration solver"
-license = "BSD-3-Clause AND Apache-2.0"
+license = "BSD-3-Clause"
 repository = "https://github.com/cgevans/equiconc"
 documentation = "https://cgevans.github.io/equiconc"
 authors = ["Constantine Evans <equiconc@mb.costi.net>"]
@@ -32,6 +32,16 @@ pyo3 = { version = "0.28", optional = true, features = ["extension-module", "abi
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1"
+# COFFEE optimizer for comparative benchmarks. Pinned to cgevans' fork,
+# which gates the `polars`-backed file-input path behind a feature so
+# `default-features = false` avoids pulling polars (its heaviest dep) into
+# the dev build. The repo has no root/workspace Cargo.toml, but Cargo's
+# git-dependency resolver finds the `coffee` package at crates/coffee/ by
+# scanning manifests.
+coffee = { git = "https://github.com/cgevans/coffee", rev = "31b5392f90922ce995ecddf9fc35cfef71c3b58a", default-features = false }
+# COFFEE pins ndarray 0.16; equiconc is on 0.17. Alias 0.16 here so benches
+# can build ndarray inputs in the version COFFEE's API accepts.
+ndarray_coffee = { package = "ndarray", version = "0.16" }
 
 [features]
 default = []

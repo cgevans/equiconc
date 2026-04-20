@@ -12,13 +12,12 @@
 //!   where `energy` is ΔG/RT (0 for free monomers). The first `n_mon`
 //!   rows are the identity block.
 
-#[path = "../tests/coffee_vendor/mod.rs"]
-mod coffee_vendor;
-
-use coffee_vendor::{Optimizer, OptimizerArgs};
+use coffee::{extras::OptimizerArgs, optimize::Optimizer};
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use equiconc::{SolverOptions, System};
 use ndarray::{Array1, Array2};
+// COFFEE's public API takes ndarray 0.16 types; equiconc is on 0.17.
+use ndarray_coffee::{Array1 as CArray1, Array2 as CArray2};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -31,10 +30,14 @@ struct TestcaseInputs {
     at: Array2<f64>,
     /// `n_species`. `-ΔG/RT` per species (0 for monomers).
     log_q: Array1<f64>,
-    /// `n_species`. `ΔG/RT` per species (COFFEE's `q_nonexp`, 0 for monomers).
-    coffee_q_nonexp: Array1<f64>,
     /// `n_mon`. Monomer concentrations.
     c0: Array1<f64>,
+    /// Same as `at`, in the ndarray 0.16 version COFFEE requires.
+    coffee_at: CArray2<f64>,
+    /// Same as `c0`, in the ndarray 0.16 version COFFEE requires.
+    coffee_c0: CArray1<f64>,
+    /// `n_species`. `ΔG/RT` per species (COFFEE's `q_nonexp`, 0 for monomers).
+    coffee_q_nonexp: CArray1<f64>,
 }
 
 fn testcase_root() -> PathBuf {
@@ -105,7 +108,7 @@ fn load_testcase(name: &str, dir: &Path) -> TestcaseInputs {
 
     let mut at = Array2::zeros((n_species, n_mon));
     let mut log_q = Array1::zeros(n_species);
-    let mut coffee_q_nonexp = Array1::zeros(n_species);
+    let mut coffee_q_nonexp = CArray1::zeros(n_species);
     // COFFEE internally clamps q_nonexp at SMALLEST_EXP_VALUE = -230.
     // We set the same cap on equiconc via `SolverOptions::log_q_clamp`
     // below (see `bench_equiconc`). Pass raw unclamped log_q; the
@@ -120,14 +123,21 @@ fn load_testcase(name: &str, dir: &Path) -> TestcaseInputs {
         coffee_q_nonexp[i] = *energy;
     }
 
+    let c0 = Array1::from_vec(c0_vec);
+    let coffee_at = CArray2::from_shape_vec((n_species, n_mon), at.iter().copied().collect())
+        .expect("coffee_at shape");
+    let coffee_c0 = CArray1::from_vec(c0.to_vec());
+
     TestcaseInputs {
         name: name.to_string(),
         n_mon,
         n_species,
         at,
         log_q,
+        c0,
+        coffee_at,
+        coffee_c0,
         coffee_q_nonexp,
-        c0: Array1::from_vec(c0_vec),
     }
 }
 
@@ -168,7 +178,8 @@ fn bench_equiconc(bencher: &mut criterion::Bencher<'_>, tc: &TestcaseInputs) {
 fn bench_coffee(bencher: &mut criterion::Bencher<'_>, tc: &TestcaseInputs) {
     let args = coffee_args();
     bencher.iter_batched(
-        || Optimizer::new(&tc.c0, &tc.at, &tc.coffee_q_nonexp, &args).expect("Optimizer::new"),
+        || Optimizer::new(&tc.coffee_c0, &tc.coffee_at, &tc.coffee_q_nonexp, &args)
+            .expect("Optimizer::new"),
         |mut opt| {
             opt.optimize(1.0).unwrap();
         },

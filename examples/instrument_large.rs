@@ -12,12 +12,11 @@
 //!
 //! `<case>` is the testcase directory name (0, 1, 2). Defaults to `0`.
 
-#[path = "../tests/coffee_vendor/mod.rs"]
-mod coffee_vendor;
-
-use coffee_vendor::{Optimizer, OptimizerArgs};
+use coffee::{extras::OptimizerArgs, optimize::Optimizer};
 use equiconc::{SolverOptions, System};
 use ndarray::{Array1, Array2};
+// COFFEE's public API takes ndarray 0.16; equiconc is on 0.17.
+use ndarray_coffee::{Array1 as CArray1, Array2 as CArray2};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -25,8 +24,10 @@ use std::time::Instant;
 struct Testcase {
     at: Array2<f64>,           // n_species × n_mon
     log_q: Array1<f64>,        // n_species (clamped, -ΔG/RT ≤ 230)
-    coffee_q_nonexp: Array1<f64>,
     c0: Array1<f64>,
+    coffee_at: CArray2<f64>,
+    coffee_c0: CArray1<f64>,
+    coffee_q_nonexp: CArray1<f64>,
     n_species: usize,
 }
 
@@ -59,7 +60,7 @@ fn load(name: &str, dir: &Path) -> Testcase {
 
     let mut at = Array2::<f64>::zeros((n_species, n_mon));
     let mut log_q = Array1::<f64>::zeros(n_species);
-    let mut q_nx = Array1::<f64>::zeros(n_species);
+    let mut coffee_q_nonexp = CArray1::<f64>::zeros(n_species);
     for (i, (counts, energy)) in rows.iter().enumerate() {
         for (j, &c) in counts.iter().enumerate() {
             at[[i, j]] = c;
@@ -68,8 +69,13 @@ fn load(name: &str, dir: &Path) -> Testcase {
         // in `time_equiconc`. The diagnostic `time_phases` below uses the
         // pre-clamped values directly so we report actual solver math.
         log_q[i] = (-energy).min(LOG_Q_MAX);
-        q_nx[i] = *energy;
+        coffee_q_nonexp[i] = *energy;
     }
+
+    let c0 = Array1::from_vec(c0_vec);
+    let coffee_at = CArray2::from_shape_vec((n_species, n_mon), at.iter().copied().collect())
+        .expect("coffee_at shape");
+    let coffee_c0 = CArray1::from_vec(c0.to_vec());
 
     eprintln!(
         "Loaded testcase {name}: m={n_mon}, n_species={n_species}"
@@ -77,8 +83,10 @@ fn load(name: &str, dir: &Path) -> Testcase {
     Testcase {
         at,
         log_q,
-        coffee_q_nonexp: q_nx,
-        c0: Array1::from_vec(c0_vec),
+        c0,
+        coffee_at,
+        coffee_c0,
+        coffee_q_nonexp,
         n_species,
     }
 }
@@ -102,7 +110,9 @@ fn time_equiconc(tc: &Testcase) -> (usize, f64) {
     (iters, elapsed)
 }
 
-fn time_coffee(tc: &Testcase) -> (usize, f64) {
+// Upstream COFFEE's `Optimizer` doesn't expose an iteration count; only wall
+// time is reported here.
+fn time_coffee(tc: &Testcase) -> f64 {
     let args = OptimizerArgs {
         scalarity: false,
         use_terminal: false,
@@ -111,10 +121,10 @@ fn time_coffee(tc: &Testcase) -> (usize, f64) {
     };
     let t0 = Instant::now();
     let mut opt =
-        Optimizer::new(&tc.c0, &tc.at, &tc.coffee_q_nonexp, &args).expect("Optimizer::new");
+        Optimizer::new(&tc.coffee_c0, &tc.coffee_at, &tc.coffee_q_nonexp, &args)
+            .expect("Optimizer::new");
     opt.optimize(1.0).expect("optimize");
-    let elapsed = t0.elapsed().as_secs_f64();
-    (opt.iterations(), elapsed)
+    t0.elapsed().as_secs_f64()
 }
 
 /// Replicates equiconc's evaluate_into inner loop for measurement.
@@ -225,12 +235,8 @@ fn main() {
         eq_per_iter * 1e3
     );
 
-    let (co_iters, co_secs) = time_coffee(&tc);
-    let co_per_iter = co_secs / co_iters as f64;
-    println!(
-        "  coffee:   {co_iters} iterations, {co_secs:.3} s total ({:.1} ms/iter)",
-        co_per_iter * 1e3
-    );
+    let co_secs = time_coffee(&tc);
+    println!("  coffee:   {co_secs:.3} s total (upstream doesn't expose iteration count)");
 
     // Per-phase breakdown of equiconc's evaluate_into at initial λ.
     // Using a moderate number of reps to amortize Instant overhead.

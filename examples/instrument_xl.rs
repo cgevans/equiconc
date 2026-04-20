@@ -5,12 +5,11 @@
 //! from a realistic range (−30 … −5 kcal/mol at 298 K). Reports iteration
 //! counts and wall time for both solvers.
 
-#[path = "../tests/coffee_vendor/mod.rs"]
-mod coffee_vendor;
-
-use coffee_vendor::{Optimizer, OptimizerArgs};
+use coffee::{extras::OptimizerArgs, optimize::Optimizer};
 use equiconc::{R, System};
 use ndarray::{Array1, Array2};
+// COFFEE's public API takes ndarray 0.16; equiconc is on 0.17.
+use ndarray_coffee::{Array1 as CArray1, Array2 as CArray2};
 use std::time::Instant;
 
 const TEMP_K: f64 = 298.15;
@@ -41,15 +40,17 @@ impl Rng {
 struct Synth {
     at: Array2<f64>,
     log_q: Array1<f64>,
-    coffee_q_nonexp: Array1<f64>,
     c0: Array1<f64>,
+    coffee_at: CArray2<f64>,
+    coffee_c0: CArray1<f64>,
+    coffee_q_nonexp: CArray1<f64>,
 }
 
 fn build_synth(m: usize, n_cplx: usize, seed: u64) -> Synth {
     let n_species = m + n_cplx;
     let mut at = Array2::<f64>::zeros((n_species, m));
     let mut log_q = Array1::<f64>::zeros(n_species);
-    let mut q_nx = Array1::<f64>::zeros(n_species);
+    let mut coffee_q_nonexp = CArray1::<f64>::zeros(n_species);
 
     for i in 0..m {
         at[[i, i]] = 1.0;
@@ -79,14 +80,20 @@ fn build_synth(m: usize, n_cplx: usize, seed: u64) -> Synth {
         // ΔG ≈ −(3 … 8) kcal/mol per strand interaction
         let dg = -(rng.uniform_range(3.0, 8.0) * total_strands as f64);
         log_q[row] = -dg / RT;
-        q_nx[row] = dg / RT;
+        coffee_q_nonexp[row] = dg / RT;
     }
+
+    let coffee_at = CArray2::from_shape_vec((n_species, m), at.iter().copied().collect())
+        .expect("coffee_at shape");
+    let coffee_c0 = CArray1::from_vec(c0.to_vec());
 
     Synth {
         at,
         log_q,
-        coffee_q_nonexp: q_nx,
         c0,
+        coffee_at,
+        coffee_c0,
+        coffee_q_nonexp,
     }
 }
 
@@ -102,7 +109,8 @@ fn time_equiconc(s: &Synth) -> (usize, f64, bool) {
     }
 }
 
-fn time_coffee(s: &Synth) -> (usize, f64, bool) {
+// Upstream COFFEE doesn't expose an iteration count; only wall time.
+fn time_coffee(s: &Synth) -> (f64, bool) {
     let args = OptimizerArgs {
         scalarity: false,
         use_terminal: false,
@@ -110,12 +118,13 @@ fn time_coffee(s: &Synth) -> (usize, f64, bool) {
         ..OptimizerArgs::default()
     };
     let t = Instant::now();
-    let mut opt = Optimizer::new(&s.c0, &s.at, &s.coffee_q_nonexp, &args).unwrap();
+    let mut opt =
+        Optimizer::new(&s.coffee_c0, &s.coffee_at, &s.coffee_q_nonexp, &args).unwrap();
     match opt.optimize(1.0) {
-        Ok(_) => (opt.iterations(), t.elapsed().as_secs_f64(), true),
+        Ok(_) => (t.elapsed().as_secs_f64(), true),
         Err(e) => {
             eprintln!("  coffee failed: {e}");
-            (opt.iterations(), t.elapsed().as_secs_f64(), false)
+            (t.elapsed().as_secs_f64(), false)
         }
     }
 }
@@ -138,16 +147,18 @@ fn main() {
         default_cases.to_vec()
     };
 
+    // `co_iters` is omitted because upstream COFFEE doesn't expose the
+    // iteration count; coffee is reported by total wall time only.
     println!(
-        "{:>6} {:>6} {:>14} {:>14} {:>10} {:>10}",
-        "m", "n_cplx", "equiconc (s/it)", "coffee   (s/it)", "eq_iters", "co_iters"
+        "{:>6} {:>6} {:>16} {:>10} {:>10}",
+        "m", "n_cplx", "equiconc (s/it)", "coffee (s)", "eq_iters"
     );
     println!("{}", "-".repeat(70));
 
     for &(m, n_cplx) in &cases {
         let s = build_synth(m, n_cplx, 0xCAFE_F00D);
         let (eq_iters, eq_secs, eq_ok) = time_equiconc(&s);
-        let (co_iters, co_secs, co_ok) = time_coffee(&s);
+        let (co_secs, co_ok) = time_coffee(&s);
         let eq_str = if eq_ok {
             format!(
                 "{:>6.3} ({:>4.1})",
@@ -158,17 +169,13 @@ fn main() {
             "FAIL".to_string()
         };
         let co_str = if co_ok {
-            format!(
-                "{:>6.3} ({:>4.1})",
-                co_secs,
-                co_secs / co_iters.max(1) as f64 * 1e3
-            )
+            format!("{co_secs:>6.3}")
         } else {
             "FAIL".to_string()
         };
         println!(
-            "{:>6} {:>6} {:>14} {:>14} {:>10} {:>10}",
-            m, n_cplx, eq_str, co_str, eq_iters, co_iters
+            "{:>6} {:>6} {:>16} {:>10} {:>10}",
+            m, n_cplx, eq_str, co_str, eq_iters
         );
     }
 }
