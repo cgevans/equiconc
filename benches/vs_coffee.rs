@@ -6,9 +6,7 @@
 use coffee::{extras::OptimizerArgs, optimize::Optimizer};
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use equiconc::{SystemBuilder, R};
-// COFFEE's public API takes ndarray 0.16 types; import under an alias so
-// this doesn't clash with equiconc's ndarray 0.17.
-use ndarray_coffee::{Array1, Array2};
+use ndarray::{Array1, Array2};
 
 const TEMP_K: f64 = 298.15;
 const RT: f64 = R * TEMP_K;

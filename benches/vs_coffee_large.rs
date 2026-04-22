@@ -16,8 +16,6 @@ use coffee::{extras::OptimizerArgs, optimize::Optimizer};
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use equiconc::{SolverOptions, System};
 use ndarray::{Array1, Array2};
-// COFFEE's public API takes ndarray 0.16 types; equiconc is on 0.17.
-use ndarray_coffee::{Array1 as CArray1, Array2 as CArray2};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -32,12 +30,12 @@ struct TestcaseInputs {
     log_q: Array1<f64>,
     /// `n_mon`. Monomer concentrations.
     c0: Array1<f64>,
-    /// Same as `at`, in the ndarray 0.16 version COFFEE requires.
-    coffee_at: CArray2<f64>,
-    /// Same as `c0`, in the ndarray 0.16 version COFFEE requires.
-    coffee_c0: CArray1<f64>,
+    /// Same as `at`, kept as a separate clone for COFFEE's API.
+    coffee_at: Array2<f64>,
+    /// Same as `c0`, kept as a separate clone for COFFEE's API.
+    coffee_c0: Array1<f64>,
     /// `n_species`. `ΔG/RT` per species (COFFEE's `q_nonexp`, 0 for monomers).
-    coffee_q_nonexp: CArray1<f64>,
+    coffee_q_nonexp: Array1<f64>,
 }
 
 fn testcase_root() -> PathBuf {
@@ -108,7 +106,7 @@ fn load_testcase(name: &str, dir: &Path) -> TestcaseInputs {
 
     let mut at = Array2::zeros((n_species, n_mon));
     let mut log_q = Array1::zeros(n_species);
-    let mut coffee_q_nonexp = CArray1::zeros(n_species);
+    let mut coffee_q_nonexp = Array1::zeros(n_species);
     // COFFEE internally clamps q_nonexp at SMALLEST_EXP_VALUE = -230.
     // We set the same cap on equiconc via `SolverOptions::log_q_clamp`
     // below (see `bench_equiconc`). Pass raw unclamped log_q; the
@@ -124,9 +122,9 @@ fn load_testcase(name: &str, dir: &Path) -> TestcaseInputs {
     }
 
     let c0 = Array1::from_vec(c0_vec);
-    let coffee_at = CArray2::from_shape_vec((n_species, n_mon), at.iter().copied().collect())
+    let coffee_at = Array2::from_shape_vec((n_species, n_mon), at.iter().copied().collect())
         .expect("coffee_at shape");
-    let coffee_c0 = CArray1::from_vec(c0.to_vec());
+    let coffee_c0 = Array1::from_vec(c0.to_vec());
 
     TestcaseInputs {
         name: name.to_string(),

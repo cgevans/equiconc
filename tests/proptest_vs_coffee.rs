@@ -7,8 +7,7 @@
 
 use coffee::{extras::OptimizerArgs, optimize::Optimizer};
 use equiconc::{SystemBuilder, R};
-// COFFEE's public API takes ndarray 0.16 types; equiconc is on 0.17.
-use ndarray_coffee::{Array1, Array2};
+use ndarray::{Array1, Array2};
 use proptest::prelude::*;
 
 // Cross-validation tolerances. COFFEE's convergence criterion

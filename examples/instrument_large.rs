@@ -15,8 +15,6 @@
 use coffee::{extras::OptimizerArgs, optimize::Optimizer};
 use equiconc::{SolverOptions, System};
 use ndarray::{Array1, Array2};
-// COFFEE's public API takes ndarray 0.16; equiconc is on 0.17.
-use ndarray_coffee::{Array1 as CArray1, Array2 as CArray2};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -25,9 +23,9 @@ struct Testcase {
     at: Array2<f64>,           // n_species × n_mon
     log_q: Array1<f64>,        // n_species (clamped, -ΔG/RT ≤ 230)
     c0: Array1<f64>,
-    coffee_at: CArray2<f64>,
-    coffee_c0: CArray1<f64>,
-    coffee_q_nonexp: CArray1<f64>,
+    coffee_at: Array2<f64>,
+    coffee_c0: Array1<f64>,
+    coffee_q_nonexp: Array1<f64>,
     n_species: usize,
 }
 
@@ -60,7 +58,7 @@ fn load(name: &str, dir: &Path) -> Testcase {
 
     let mut at = Array2::<f64>::zeros((n_species, n_mon));
     let mut log_q = Array1::<f64>::zeros(n_species);
-    let mut coffee_q_nonexp = CArray1::<f64>::zeros(n_species);
+    let mut coffee_q_nonexp = Array1::<f64>::zeros(n_species);
     for (i, (counts, energy)) in rows.iter().enumerate() {
         for (j, &c) in counts.iter().enumerate() {
             at[[i, j]] = c;
@@ -73,9 +71,9 @@ fn load(name: &str, dir: &Path) -> Testcase {
     }
 
     let c0 = Array1::from_vec(c0_vec);
-    let coffee_at = CArray2::from_shape_vec((n_species, n_mon), at.iter().copied().collect())
+    let coffee_at = Array2::from_shape_vec((n_species, n_mon), at.iter().copied().collect())
         .expect("coffee_at shape");
-    let coffee_c0 = CArray1::from_vec(c0.to_vec());
+    let coffee_c0 = Array1::from_vec(c0.to_vec());
 
     eprintln!(
         "Loaded testcase {name}: m={n_mon}, n_species={n_species}"
