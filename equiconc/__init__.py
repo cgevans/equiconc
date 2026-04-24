@@ -1,5 +1,6 @@
+from . import equiconc as _native
 from .equiconc import *
 
-__doc__ = equiconc.__doc__
-if hasattr(equiconc, "__all__"):
-    __all__ = equiconc.__all__
+__doc__ = _native.__doc__
+if hasattr(_native, "__all__"):
+    __all__ = _native.__all__

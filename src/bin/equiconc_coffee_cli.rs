@@ -83,11 +83,23 @@ fn density_water_molar(t_c: f64) -> f64 {
 // Parsing
 // ---------------------------------------------------------------------------
 
+/// Split a COFFEE-style row into fields.
+///
+/// COFFEE accepts whitespace, comma, semicolon, and pipe separators for
+/// complex tables. Reuse the same delimiter set here so `.csv`/`.tsv`
+/// extensions behave as advertised; empty fields are ignored to match
+/// repeated whitespace behavior.
+fn split_fields(line: &str) -> Vec<&str> {
+    line.split(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | '|'))
+        .filter(|field| !field.is_empty())
+        .collect()
+}
+
 /// Read monomer initial concentrations from a `.con` file.
 ///
 /// Format: one f64 per non-blank line, in scientific or decimal notation.
-/// Lines that split on whitespace into more than one token are rejected —
-/// COFFEE's reader enforces a single-column contract.
+/// Lines that split into more than one delimited field are rejected —
+/// this preserves the single-column concentration-file contract.
 fn parse_con(content: &str) -> Result<Array1<f64>, String> {
     let mut values: Vec<f64> = Vec::new();
     for (lineno, raw) in content.lines().enumerate() {
@@ -95,10 +107,10 @@ fn parse_con(content: &str) -> Result<Array1<f64>, String> {
         if line.is_empty() {
             continue;
         }
-        let tokens: Vec<&str> = line.split_whitespace().collect();
+        let tokens = split_fields(line);
         if tokens.len() != 1 {
             return Err(format!(
-                ".con line {} has {} whitespace-separated fields; expected 1",
+                ".con line {} has {} delimited fields; expected 1",
                 lineno + 1,
                 tokens.len()
             ));
@@ -129,12 +141,13 @@ fn parse_con(content: &str) -> Result<Array1<f64>, String> {
 /// rows: if every row has `col0 == row_num + 1` and `col1 == 1`, those two
 /// leading columns are treated as bookkeeping and dropped. Otherwise the
 /// row is taken to be `[stoich_1, .., stoich_{n_mon}, ΔG]` directly.
+/// Fields may be separated by whitespace, comma, semicolon, or pipe.
 fn parse_ocx(content: &str, n_mon: usize) -> Result<(Array2<f64>, Array1<f64>), String> {
     let rows: Vec<Vec<String>> = content
         .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
-        .map(|l| l.split_whitespace().map(str::to_owned).collect())
+        .map(|l| split_fields(l).into_iter().map(str::to_owned).collect())
         .collect();
 
     if rows.is_empty() {
@@ -473,7 +486,7 @@ mod tests {
 
     #[test]
     fn parse_con_rejects_multi_column() {
-        let content = "1.0e-6\n2.0e-6 oops\n";
+        let content = "1.0e-6\n2.0e-6,oops\n";
         assert!(parse_con(content).is_err());
     }
 
@@ -514,6 +527,36 @@ mod tests {
 1\t0\t0.0
 0\t1\t0.0
 1\t1\t-5.0
+";
+        let (a, dg) = parse_ocx(content, 2).unwrap();
+        assert_eq!(a.shape(), &[3, 2]);
+        assert_eq!(a[[2, 0]], 1.0);
+        assert_eq!(a[[2, 1]], 1.0);
+        assert_eq!(dg[2], -5.0);
+    }
+
+    #[test]
+    fn parse_ocx_raw_layout_accepts_coffee_delimiters() {
+        let content = "\
+1,0,0.0
+0;1;0.0
+1|1|-5.0
+";
+        let (a, dg) = parse_ocx(content, 2).unwrap();
+        assert_eq!(a.shape(), &[3, 2]);
+        assert_eq!(a[[0, 0]], 1.0);
+        assert_eq!(a[[1, 1]], 1.0);
+        assert_eq!(a[[2, 0]], 1.0);
+        assert_eq!(a[[2, 1]], 1.0);
+        assert_eq!(dg[2], -5.0);
+    }
+
+    #[test]
+    fn parse_ocx_nupack_layout_accepts_csv() {
+        let content = "\
+1,1,1,0,0.0
+2,1,0,1,0.0
+3,1,1,1,-5.0
 ";
         let (a, dg) = parse_ocx(content, 2).unwrap();
         assert_eq!(a.shape(), &[3, 2]);
