@@ -35,7 +35,15 @@ confidence-threshold = 0.93
 # Add an entry to `ignore` with a comment if a specific advisory is known
 # to not affect equiconc or is awaiting an upstream fix.
 version = 2
-ignore = []
+ignore = [
+    # `paste` is unmaintained but only pulled in transitively as a
+    # proc-macro build-dep of `pulp` (the SIMD dispatch crate enabled by
+    # the `simd` feature). It runs at compile time, generates code in
+    # pulp, and never executes at runtime — equiconc's runtime safety is
+    # not affected by paste's maintenance status. Re-evaluate when pulp
+    # migrates off paste (it's tracked upstream).
+    "RUSTSEC-2024-0436",
+]
 
 [sources]
 # Refuse runtime crates that come from anywhere other than the default
