@@ -1,5 +1,5 @@
 //! Top-level layout. Owns the input/options signals and the
-//! [`WorkerHandle`], and wires their state into the panels.
+//! [`crate::worker_handle::WorkerHandle`], and wires their state into the panels.
 
 use leptos::prelude::*;
 
