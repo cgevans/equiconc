@@ -8,7 +8,7 @@ applied generally, for example, to find equilibrium concentrations in tile assem
 
 The library is written in Rust, with a Python interface that is intended to be easily usable.
 
-There is also an [in-browser web interface](https://cgevans.github.io/equiconc/app/): the same Rust solver compiled to WebAssembly, with no backend and no data leaving the page.
+There is also an [in-browser web interface](https://cgevans.github.io/equiconc/app/), which runs the solver in your browser directly (not a server).  This interface was inspired by [COFFEE](https://coffeesolver.dev/); Equiconc also supports a modified version of their log-based optimization ([Yu et al, 2025](https://doi.org/10.1109/SIEDS65500.2025.11021092)).
 
 ## Quick example
 
