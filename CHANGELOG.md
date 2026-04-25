@@ -4,6 +4,43 @@
 
 ### Added
 
+- Optional log-objective trust-region path, selected via
+  `SolverOptions::objective = SolverObjective::Log` (Rust) or
+  `SolverOptions(objective="log")` (Python). The default remains
+  `SolverObjective::Linear`, so existing callers see no behavior change.
+  The log path minimizes `g(λ) = ln f(λ)` rather than the linear dual
+  `f(λ)`; on stiff systems (very strong binding, asymmetric `c⁰`) it
+  often converges in many fewer iterations because `g` compresses the
+  exponential dynamic range of `f`. The log objective is non-convex
+  (`H_g` can be indefinite away from the optimum); equiconc compensates
+  with on-the-fly modified-Cholesky regularization of the model
+  Hessian, so the dog-leg step always sees a PD matrix and
+  `predicted_reduction > 0` by construction. The implementation
+  structurally avoids the three documented failure modes of COFFEE's
+  log-Lagrangian solver (see `coffee-bugs.md` and
+  `coffee/docs/issue2-analysis.md`):
+
+  - Bug 1 (NaN from `∞ − ∞`): `evaluate_log_into` computes the
+    objective via log-sum-exp on the un-clamped `log_q + Aᵀλ`, never
+    forming `f` and then taking its log. Steps that would push `f ≤ 0`
+    are rejected and the trust region shrinks.
+  - Bug 2 (premature convergence at `λ ≈ 0` under strong binding): the
+    convergence test is on the primal mass-conservation residual
+    `|Ac − c⁰|_i < atol + rtol · c0_i` for both objectives — never on
+    the log-rescaled gradient `∇g = ∇f / f`, which is the term COFFEE
+    suppresses to floating-point underflow.
+  - Bug 3 / coffee issue #2 (trust-region oscillation on indefinite
+    Hessians): the model Hessian is regularized to PD before dog-leg
+    sees it, and a defensive `pred_reduction ≤ 0 → ρ = -1` sentinel
+    catches any residual case where regularization saturates.
+
+  Validated against COFFEE on the existing
+  `tests/proptest_vs_coffee.rs` cross-check (new
+  `prop_equiconc_log_matches_coffee`) and against the linear path on
+  `tests/proptest_equiconc.rs` (`prop_log_matches_linear`). Explicit
+  reproducers for the three documented coffee failure cases now live in
+  `src/lib.rs` (`coffee_bug1_positive_dg_conformer_log`,
+  `coffee_bug2_strong_binding_log`, `coffee_issue2_strong_dimer_log`).
 - New optional binary `equiconc-coffee-cli` (gated behind the `coffee-cli`
   Cargo feature) that accepts the same NUPACK-style `.ocx`/`.cfe` +
   `.con` input files as COFFEE's `coffee_cli` and produces the same

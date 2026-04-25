@@ -75,7 +75,7 @@ At the optimum, \(\nabla f = 0\) recovers the mass conservation equations.
 The Hessian is:
 
 \[
-\mathbf{H} = \mathbf{A}\, \text{diag}(\mathbf{c})\, \mathbf{A}^\top
+\mathbf{H}_f = \mathbf{A}\, \text{diag}(\mathbf{c})\, \mathbf{A}^\top
 \]
 
 Since all \(c_j > 0\), the Hessian is positive definite, guaranteeing that
@@ -87,7 +87,7 @@ equiconc uses a **trust-region Newton method** with **dog-leg steps**:
 
 1. At each iteration, compute the Newton step
    \(\mathbf{p}_N = -\mathbf{H}^{-1} \nabla f\) via Cholesky decomposition
-   (always succeeds since \(\mathbf{H} \succ 0\)).
+   (always succeeds for the linear objective since \(\mathbf{H}_f \succ 0\)).
 
 2. If \(\|\mathbf{p}_N\| \leq \Delta\) (trust-region radius), take the full
    Newton step.
@@ -97,6 +97,39 @@ equiconc uses a **trust-region Newton method** with **dog-leg steps**:
 
 4. Update the trust-region radius based on the ratio of actual to predicted
    reduction.
+
+## Objective surface: linear vs. log
+
+equiconc exposes two objective surfaces for the trust-region step,
+selected via `SolverOptions.objective`:
+
+- **Linear** (default) minimizes \(f(\boldsymbol\lambda)\) directly. The
+  Hessian \(\mathbf H_f = \mathbf A\, \text{diag}(\mathbf c)\, \mathbf A^\top\)
+  is positive semi-definite by construction, so plain Cholesky always
+  succeeds.
+- **Log** minimizes the transformed objective
+  \[
+  g(\boldsymbol\lambda) = \ln f(\boldsymbol\lambda).
+  \]
+  Because \(f > 0\) at any feasible iterate (and at the optimum), \(g\)
+  shares the minimizer of \(f\) but compresses its exponential dynamic
+  range, which can dramatically reduce the iteration count on stiff
+  systems (very strong binding, asymmetric \(\mathbf c^0\)). Its gradient
+  and Hessian are
+  \[
+  \nabla g = \frac{\nabla f}{f}, \qquad
+  \mathbf H_g = \frac{\mathbf H_f}{f} - \frac{(\nabla f)(\nabla f)^\top}{f^2}.
+  \]
+  The rank-one subtraction makes \(\mathbf H_g\) potentially **indefinite
+  away from the optimum**, so \(g\) is *not* globally convex. equiconc
+  compensates with on-the-fly diagonal **modified Cholesky**
+  regularization, guards \(f > 0\) at every iterate, and rejects any
+  trial step whose quadratic model predicts an ascent.
+
+Both paths share the dual variable \(\boldsymbol\lambda\), the same
+primal recovery \(c_j = \exp(\log Q_j + (\mathbf A^\top\boldsymbol\lambda)_j)\),
+and the same convergence test on the primal mass-conservation residual,
+so results are interchangeable to within tolerance.
 
 ### Log-space evaluation
 

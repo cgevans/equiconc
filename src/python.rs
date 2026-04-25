@@ -3,7 +3,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::collections::HashMap;
 
-use crate::{Equilibrium, EquilibriumError, SolverOptions};
+use crate::{Equilibrium, EquilibriumError, SolverObjective, SolverOptions};
 
 // ---------------------------------------------------------------------------
 // Error mapping
@@ -131,6 +131,15 @@ fn resolve_energy_spec(
 /// log_q_clamp : float or None, optional
 ///     Optional upper bound on ``log_q = -ΔG/RT`` applied at
 ///     construction time (default: None).
+/// objective : str, optional
+///     Trust-region objective surface: ``"linear"`` (default) minimizes
+///     the convex Dirks dual ``f(λ)`` directly; ``"log"`` minimizes
+///     ``g(λ) = ln f(λ)``. The log path can converge in many fewer
+///     iterations on stiff systems (very strong binding, asymmetric
+///     ``c⁰``) but is non-convex; equiconc handles the resulting
+///     indefinite Hessians via on-the-fly modified-Cholesky
+///     regularization. The mass-conservation convergence test is
+///     identical for both. Default: ``"linear"``.
 #[pyclass(name = "SolverOptions", module = "equiconc", from_py_object)]
 #[derive(Clone)]
 struct PySolverOptions {
@@ -157,6 +166,7 @@ impl PySolverOptions {
         trust_region_grow_scale=None,
         log_c_clamp=None,
         log_q_clamp=None,
+        objective=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -175,6 +185,7 @@ impl PySolverOptions {
         trust_region_grow_scale: Option<f64>,
         log_c_clamp: Option<f64>,
         log_q_clamp: Option<f64>,
+        objective: Option<&str>,
     ) -> PyResult<Self> {
         let mut opts = SolverOptions::default();
         if let Some(v) = max_iterations { opts.max_iterations = v; }
@@ -195,6 +206,17 @@ impl PySolverOptions {
         // internally too since Python cannot distinguish "not passed"
         // from "passed as None" in this pyo3 form.
         opts.log_q_clamp = log_q_clamp;
+        if let Some(s) = objective {
+            opts.objective = match s {
+                "linear" => SolverObjective::Linear,
+                "log" => SolverObjective::Log,
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "objective must be \"linear\" or \"log\", got {other:?}"
+                    )));
+                }
+            };
+        }
         opts.validate().map_err(map_err)?;
         Ok(PySolverOptions { inner: opts })
     }
@@ -215,6 +237,12 @@ impl PySolverOptions {
     #[getter] fn trust_region_grow_scale(&self) -> f64 { self.inner.trust_region_grow_scale }
     #[getter] fn log_c_clamp(&self) -> f64 { self.inner.log_c_clamp }
     #[getter] fn log_q_clamp(&self) -> Option<f64> { self.inner.log_q_clamp }
+    #[getter] fn objective(&self) -> &'static str {
+        match self.inner.objective {
+            SolverObjective::Linear => "linear",
+            SolverObjective::Log => "log",
+        }
+    }
 
     fn __repr__(&self) -> String {
         format!("SolverOptions({:?})", self.inner)

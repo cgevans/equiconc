@@ -82,6 +82,20 @@ is computed at solve time, so changing temperature shifts the equilibrium:
 sys.complex("AB", [("A", 1), ("B", 1)], dh_st=-50.0, ds_st=-0.13)
 ```
 
+**ΔG at one temperature plus ΔS** — when you have ΔG° measured at a
+reference temperature and the entropy of the reaction, pass `dg_st` as a
+`(value, temperature_C)` tuple together with `ds_st`. Equiconc derives
+ΔH = ΔG + T·ΔS internally, so the resulting complex behaves like a
+`dh_st`/`ds_st` pair and shifts correctly with `temperature_C`:
+
+```python
+sys.complex(
+    "AB", [("A", 1), ("B", 1)],
+    dg_st=(-15.0, 37),    # -15 kcal/mol at 37 C
+    ds_st=-0.30,          # kcal/(mol K)
+)
+```
+
 ### Builder pattern
 
 The API uses a fluent builder pattern. Chain calls to `monomer()` and
@@ -137,6 +151,56 @@ eq = (
     .equilibrium()
 )
 ```
+
+## Tuning the solver
+
+The default solver settings work for the vast majority of systems. When
+you need to tune tolerances, trust-region behavior, or numerical clamps,
+construct a `SolverOptions` and pass it to `System(options=...)`:
+
+```python
+import equiconc
+
+opts = equiconc.SolverOptions(
+    gradient_rel_tol=1e-9,    # tighter convergence
+    max_iterations=2000,
+)
+
+eq = (
+    equiconc.System(temperature_C=37, options=opts)
+    .monomer("A", 1e-6)
+    .monomer("B", 1e-6)
+    .complex("AB", [("A", 1), ("B", 1)], dg_st=-12.0)
+    .equilibrium()
+)
+```
+
+### Choosing the objective surface
+
+`SolverOptions` exposes two trust-region paths via `objective=`:
+
+- `"linear"` (default) — minimizes the convex Dirks dual
+  \(f(\boldsymbol\lambda)\) directly. The Hessian is positive
+  semi-definite, so plain Cholesky always succeeds. Robust on every
+  system the formulation can express.
+- `"log"` — minimizes \(g(\boldsymbol\lambda) = \ln f(\boldsymbol\lambda)\).
+  Same minimizer, but compresses the exponential dynamic range and can
+  converge in dramatically fewer iterations on stiff systems (very
+  strong binding, asymmetric \(\mathbf c^0\), etc.). The price is that
+  \(g\) is non-convex away from the optimum; equiconc compensates with
+  modified-Cholesky regularization on indefinite Hessians and rejects
+  any step whose model predicts an ascent.
+
+```python
+opts = equiconc.SolverOptions(objective="log")
+```
+
+The mass-conservation convergence test is identical for both paths, so
+results are interchangeable to within tolerance.
+
+See the [API Reference](api.md#solveroptions) for the full list of
+fields (max iterations, relaxed tolerances, trust-region ρ thresholds
+and scales, `log_c_clamp`, `log_q_clamp`, …).
 
 ## Conventions
 

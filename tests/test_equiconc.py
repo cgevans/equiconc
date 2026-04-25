@@ -629,3 +629,91 @@ def test_solver_options_repr():
     r = repr(opts)
     assert "SolverOptions" in r
     assert "42" in r
+
+
+# ---------------------------------------------------------------------------
+# Log-objective tests
+# ---------------------------------------------------------------------------
+
+
+def test_objective_default_is_linear():
+    opts = equiconc.SolverOptions()
+    assert opts.objective == "linear"
+
+
+def test_objective_log_kwarg_round_trip():
+    opts = equiconc.SolverOptions(objective="log")
+    assert opts.objective == "log"
+
+
+def test_objective_invalid_raises_with_helpful_message():
+    with pytest.raises(ValueError, match='"linear" or "log"'):
+        equiconc.SolverOptions(objective="bogus")
+
+
+def test_objective_log_matches_linear_on_simple_dimer():
+    c0 = 100e-9
+    dg = -10.0
+    lin = (
+        equiconc.System()
+        .monomer("A", c0)
+        .monomer("B", c0)
+        .complex("AB", [("A", 1), ("B", 1)], dg_st=dg)
+        .equilibrium()
+    )
+    log_eq = (
+        equiconc.System(options=equiconc.SolverOptions(objective="log"))
+        .monomer("A", c0)
+        .monomer("B", c0)
+        .complex("AB", [("A", 1), ("B", 1)], dg_st=dg)
+        .equilibrium()
+    )
+    for name in ("A", "B", "AB"):
+        assert log_eq[name] == pytest.approx(lin[name], rel=1e-6)
+
+
+def test_objective_log_handles_coffee_bug1():
+    # Single monomer with a positive-ΔG conformer at 20 °C — the case
+    # that produces NaN in coffee. Log path must return finite, correct
+    # concentrations.
+    c0 = 1e-3
+    eq = (
+        equiconc.System(
+            temperature_C=20.0,
+            options=equiconc.SolverOptions(objective="log"),
+        )
+        .monomer("A", c0)
+        .complex("Astar", [("A", 1)], dg_st=3.9)
+        .equilibrium()
+    )
+    a = eq["A"]
+    a_star = eq["Astar"]
+    # Mass conservation.
+    assert (a + a_star) == pytest.approx(c0, rel=1e-9)
+    # Both finite.
+    assert a > 0 and a_star > 0
+    # Astar/A = exp(-3.9 / RT) ≈ 0.0012 at 20 °C.
+    R_gas = 1.987204e-3
+    expected_ratio = math.exp(-3.9 / (R_gas * 293.15))
+    assert (a_star / a) == pytest.approx(expected_ratio, rel=1e-7)
+
+
+def test_objective_log_handles_coffee_bug2_strong_binding():
+    # A + 2B ⇌ AB2 with extreme ΔG and asymmetric c0 — coffee fails
+    # mass conservation here. Log path must respect it.
+    eq = (
+        equiconc.System(
+            temperature_K=349.7,
+            options=equiconc.SolverOptions(objective="log"),
+        )
+        .monomer("A", 1e-3)
+        .monomer("B", 162.4e-6)
+        .complex("AB2", [("A", 1), ("B", 2)], dg_st=-39.47)
+        .equilibrium()
+    )
+    a, b, ab2 = eq["A"], eq["B"], eq["AB2"]
+    # Mass conservation tight.
+    assert (a + ab2) == pytest.approx(1e-3, rel=1e-9)
+    assert (b + 2 * ab2) == pytest.approx(162.4e-6, rel=1e-9)
+    # And specifically: free A must not exceed initial A (coffee bug).
+    assert a <= 1e-3
