@@ -4,7 +4,12 @@ build-backend = "maturin"
 
 [project]
 name = "equiconc"
-version = "0.3.0"
+# Version is sourced from Cargo.toml by maturin so a single bump there
+# propagates to both the Rust crate and the Python wheel; previous
+# releases drifted (pyproject.toml stuck on 0.3.0 while Cargo.toml
+# moved to 0.4.0), which collided with the 0.3.0 record on PyPI and
+# blocked the 0.4.0 publish.
+dynamic = ["version"]
 requires-python = ">=3.10"
 description = "Equilibrium concentration solver"
 license = "BSD-3-Clause"

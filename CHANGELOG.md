@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-04-25
+
+### Fixed
+
+- The 0.4.0 PyPI publish was blocked by a stale `version = "0.3.0"` in
+  `pyproject.toml`: maturin built every wheel as 0.3.0, which collided
+  with the existing 0.3.0 record on PyPI. `pyproject.toml` now uses
+  `dynamic = ["version"]` and lets maturin source the version from
+  `Cargo.toml`, so a single bump there propagates to both the Rust
+  crate and the Python wheel. The 0.4.0 Rust crate (already on
+  crates.io) is unaffected; this is purely a re-publish to land the
+  Python wheels of the same release.
+
 ## [0.4.0] - 2026-04-25
 
 ### Added
