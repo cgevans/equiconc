@@ -8,6 +8,8 @@ applied generally, for example, to find equilibrium concentrations in tile assem
 
 The library is written in Rust, with a Python interface that is intended to be easily usable.
 
+There is also an [in-browser web interface](https://cgevans.github.io/equiconc/app/) — the same Rust solver compiled to WebAssembly, with no backend and no data leaving the page.
+
 ## Quick example
 
 ```python
