@@ -15,7 +15,28 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded runs on the same PR. Tag/main pushes have unique
+# refs and aren't affected.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  lint:
+    name: Lint (fmt + rustdoc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - name: cargo doc (deny warnings)
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
   cargo-deny:
     name: cargo-deny (licenses, advisories, sources)
     runs-on: ubuntu-latest
@@ -51,6 +72,55 @@ jobs:
         with:
           files: coverage-rust-from-python.lcov coverage-python.xml coverage-rust.lcov
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Lightweight cross-platform / cross-Python smoke tests. The `tests`
+  # job above is the source of truth (with coverage) on Linux+3.12; this
+  # job covers the matrix corners that ship in the PyPI wheel but are
+  # never otherwise exercised: the minimum supported Python (3.10), the
+  # free-threaded interpreter (3.13t), and macOS / Windows.
+  tests-matrix:
+    name: Tests (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-py3.10
+            os: ubuntu-latest
+            python-version: "3.10"
+            maturin-extra: ""
+          - label: linux-py3.13t
+            os: ubuntu-latest
+            python-version: "3.13t"
+            # abi3-py310 doesn't apply on free-threaded; opt out of the
+            # crate default features and turn on `python` explicitly,
+            # matching the free-threaded wheel build below.
+            maturin-extra: "--no-default-features --features python"
+          - label: macos-py3.12
+            os: macos-latest
+            python-version: "3.12"
+            maturin-extra: ""
+          - label: windows-py3.12
+            os: windows-latest
+            python-version: "3.12"
+            maturin-extra: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: cargo test (lib)
+        run: cargo test --lib
+      - run: uv sync --dev --no-install-project
+      - name: Build extension
+        run: uv run maturin develop --uv --release ${{ matrix.maturin-extra }}
+      - name: pytest
+        run: uv run pytest tests/test_equiconc.py -v
 
   linux:
     name: Python Linux builds

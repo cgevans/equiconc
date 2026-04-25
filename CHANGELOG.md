@@ -67,9 +67,29 @@
   Dev-dependencies (criterion, proptest, and the `cgevans/coffee` git
   dep used for cross-checks) are excluded via `[graph] exclude-dev`
   since they ship in neither the crate tarball nor the wheel.
+- CI lint job: `cargo fmt --all --check` and
+  `cargo doc --no-deps --all-features` with `RUSTDOCFLAGS=-D warnings`.
+  Catches formatting drift and broken intra-doc links ahead of a
+  docs.rs publish. (Clippy is *not* yet wired in; the codebase has a
+  pile of pre-existing findings to triage first.)
+- CI cross-platform / cross-Python smoke tests (`tests-matrix` job):
+  the existing `tests` job runs only on Linux + Python 3.12 because of
+  the cargo-llvm-cov coverage instrumentation; the new matrix exercises
+  the corners that ship in the PyPI wheel but were never otherwise
+  tested — minimum supported Python (3.10), free-threaded Python
+  (3.13t), macOS, and Windows.
+- Dependabot configuration (`.github/dependabot.yml`) for weekly Cargo,
+  GitHub Actions, and uv (Python) dependency updates, with non-major
+  bumps grouped per ecosystem to reduce PR churn.
 
 ### Changed
 
+- `cargo fmt --all` sweep across `src/`, `tests/`, `benches/`, and
+  `examples/`. No behavior change; lands ahead of the new
+  `cargo fmt --check` CI gate so the gate starts green.
+- `builds.yml` now uses `concurrency: cancel-in-progress` keyed on
+  `${{ github.ref }}` for `pull_request` events, so superseded PR runs
+  are cancelled. Tag and main pushes are unaffected.
 - Reverted the crate `license` field from `"BSD-3-Clause AND Apache-2.0"` back
   to `"BSD-3-Clause"`. The dual declaration existed only because of the
   vendored COFFEE sources; with vendoring removed, the published crate

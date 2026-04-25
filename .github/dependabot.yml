@@ -1,0 +1,39 @@
+version: 2
+updates:
+  # Rust crate dependencies (Cargo.toml / Cargo.lock).
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    # Bundle non-major bumps together to reduce PR churn on this small
+    # dep tree. Major bumps still get their own PR for case-by-case review.
+    groups:
+      cargo-non-major:
+        update-types:
+          - patch
+          - minor
+
+  # GitHub Actions versions referenced in .github/workflows/.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      gha-non-major:
+        update-types:
+          - patch
+          - minor
+
+  # Python dev/docs dependencies declared in pyproject.toml + uv.lock.
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      uv-non-major:
+        update-types:
+          - patch
+          - minor
