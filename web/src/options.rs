@@ -328,7 +328,16 @@ where
     G: Fn(&UiOptions) -> f64 + Copy + 'static,
     S: Fn(&mut UiOptions, f64) + Copy + 'static,
 {
-    sci_input(options, get, move |o, v| { if v.is_finite() { set(o, v); } }, style)
+    sci_input(
+        options,
+        get,
+        move |o, v| {
+            if v.is_finite() {
+                set(o, v);
+            }
+        },
+        style,
+    )
 }
 
 fn sci_input<G, S>(

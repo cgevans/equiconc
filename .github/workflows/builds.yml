@@ -191,7 +191,12 @@ jobs:
             # regression in the SIMD path is caught here rather than at
             # release. (lint already runs `cargo clippy --all-features`,
             # but that's compile-only.)
-            maturin-extra: "--features simd"
+            #
+            # `python` has to come along explicitly: the crate's default
+            # features are empty (the SIMD-opt-in flip set them to `[]`),
+            # so without it maturin sees no PyO3 bindings and falls back
+            # to cffi, which then fails because the uv venv has no pip.
+            maturin-extra: "--features simd,python"
             cargo-test-extra: "--features simd"
           - label: macos-py3.12
             os: macos-latest

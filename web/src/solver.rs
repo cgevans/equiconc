@@ -232,10 +232,7 @@ mod tests {
             .zip(res_rt.concentrations.iter())
         {
             let denom = a.abs().max(1e-30);
-            assert!(
-                (a - b).abs() / denom < 1e-9,
-                "kcal={a:e} vs RT={b:e}"
-            );
+            assert!((a - b).abs() / denom < 1e-9, "kcal={a:e} vs RT={b:e}");
         }
     }
 
