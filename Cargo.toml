@@ -1,6 +1,6 @@
 [package]
 name = "equiconc"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Equilibrium concentration solver"
 license = "BSD-3-Clause"

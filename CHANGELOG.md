@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-25
+
 ### Added
 
 - Optional log-objective trust-region path, selected via
