@@ -188,20 +188,48 @@ impl PySolverOptions {
         objective: Option<&str>,
     ) -> PyResult<Self> {
         let mut opts = SolverOptions::default();
-        if let Some(v) = max_iterations { opts.max_iterations = v; }
-        if let Some(v) = gradient_abs_tol { opts.gradient_abs_tol = v; }
-        if let Some(v) = gradient_rel_tol { opts.gradient_rel_tol = v; }
-        if let Some(v) = relaxed_gradient_abs_tol { opts.relaxed_gradient_abs_tol = v; }
-        if let Some(v) = relaxed_gradient_rel_tol { opts.relaxed_gradient_rel_tol = v; }
-        if let Some(v) = stagnation_threshold { opts.stagnation_threshold = v; }
-        if let Some(v) = initial_trust_region_radius { opts.initial_trust_region_radius = v; }
-        if let Some(v) = max_trust_region_radius { opts.max_trust_region_radius = v; }
-        if let Some(v) = step_accept_threshold { opts.step_accept_threshold = v; }
-        if let Some(v) = trust_region_shrink_rho { opts.trust_region_shrink_rho = v; }
-        if let Some(v) = trust_region_grow_rho { opts.trust_region_grow_rho = v; }
-        if let Some(v) = trust_region_shrink_scale { opts.trust_region_shrink_scale = v; }
-        if let Some(v) = trust_region_grow_scale { opts.trust_region_grow_scale = v; }
-        if let Some(v) = log_c_clamp { opts.log_c_clamp = v; }
+        if let Some(v) = max_iterations {
+            opts.max_iterations = v;
+        }
+        if let Some(v) = gradient_abs_tol {
+            opts.gradient_abs_tol = v;
+        }
+        if let Some(v) = gradient_rel_tol {
+            opts.gradient_rel_tol = v;
+        }
+        if let Some(v) = relaxed_gradient_abs_tol {
+            opts.relaxed_gradient_abs_tol = v;
+        }
+        if let Some(v) = relaxed_gradient_rel_tol {
+            opts.relaxed_gradient_rel_tol = v;
+        }
+        if let Some(v) = stagnation_threshold {
+            opts.stagnation_threshold = v;
+        }
+        if let Some(v) = initial_trust_region_radius {
+            opts.initial_trust_region_radius = v;
+        }
+        if let Some(v) = max_trust_region_radius {
+            opts.max_trust_region_radius = v;
+        }
+        if let Some(v) = step_accept_threshold {
+            opts.step_accept_threshold = v;
+        }
+        if let Some(v) = trust_region_shrink_rho {
+            opts.trust_region_shrink_rho = v;
+        }
+        if let Some(v) = trust_region_grow_rho {
+            opts.trust_region_grow_rho = v;
+        }
+        if let Some(v) = trust_region_shrink_scale {
+            opts.trust_region_shrink_scale = v;
+        }
+        if let Some(v) = trust_region_grow_scale {
+            opts.trust_region_grow_scale = v;
+        }
+        if let Some(v) = log_c_clamp {
+            opts.log_c_clamp = v;
+        }
         // log_q_clamp: None from Python means "unset"; we store None
         // internally too since Python cannot distinguish "not passed"
         // from "passed as None" in this pyo3 form.
@@ -222,22 +250,68 @@ impl PySolverOptions {
     }
 
     // Getters for every field (so Python users can inspect).
-    #[getter] fn max_iterations(&self) -> usize { self.inner.max_iterations }
-    #[getter] fn gradient_abs_tol(&self) -> f64 { self.inner.gradient_abs_tol }
-    #[getter] fn gradient_rel_tol(&self) -> f64 { self.inner.gradient_rel_tol }
-    #[getter] fn relaxed_gradient_abs_tol(&self) -> f64 { self.inner.relaxed_gradient_abs_tol }
-    #[getter] fn relaxed_gradient_rel_tol(&self) -> f64 { self.inner.relaxed_gradient_rel_tol }
-    #[getter] fn stagnation_threshold(&self) -> u32 { self.inner.stagnation_threshold }
-    #[getter] fn initial_trust_region_radius(&self) -> f64 { self.inner.initial_trust_region_radius }
-    #[getter] fn max_trust_region_radius(&self) -> f64 { self.inner.max_trust_region_radius }
-    #[getter] fn step_accept_threshold(&self) -> f64 { self.inner.step_accept_threshold }
-    #[getter] fn trust_region_shrink_rho(&self) -> f64 { self.inner.trust_region_shrink_rho }
-    #[getter] fn trust_region_grow_rho(&self) -> f64 { self.inner.trust_region_grow_rho }
-    #[getter] fn trust_region_shrink_scale(&self) -> f64 { self.inner.trust_region_shrink_scale }
-    #[getter] fn trust_region_grow_scale(&self) -> f64 { self.inner.trust_region_grow_scale }
-    #[getter] fn log_c_clamp(&self) -> f64 { self.inner.log_c_clamp }
-    #[getter] fn log_q_clamp(&self) -> Option<f64> { self.inner.log_q_clamp }
-    #[getter] fn objective(&self) -> &'static str {
+    #[getter]
+    fn max_iterations(&self) -> usize {
+        self.inner.max_iterations
+    }
+    #[getter]
+    fn gradient_abs_tol(&self) -> f64 {
+        self.inner.gradient_abs_tol
+    }
+    #[getter]
+    fn gradient_rel_tol(&self) -> f64 {
+        self.inner.gradient_rel_tol
+    }
+    #[getter]
+    fn relaxed_gradient_abs_tol(&self) -> f64 {
+        self.inner.relaxed_gradient_abs_tol
+    }
+    #[getter]
+    fn relaxed_gradient_rel_tol(&self) -> f64 {
+        self.inner.relaxed_gradient_rel_tol
+    }
+    #[getter]
+    fn stagnation_threshold(&self) -> u32 {
+        self.inner.stagnation_threshold
+    }
+    #[getter]
+    fn initial_trust_region_radius(&self) -> f64 {
+        self.inner.initial_trust_region_radius
+    }
+    #[getter]
+    fn max_trust_region_radius(&self) -> f64 {
+        self.inner.max_trust_region_radius
+    }
+    #[getter]
+    fn step_accept_threshold(&self) -> f64 {
+        self.inner.step_accept_threshold
+    }
+    #[getter]
+    fn trust_region_shrink_rho(&self) -> f64 {
+        self.inner.trust_region_shrink_rho
+    }
+    #[getter]
+    fn trust_region_grow_rho(&self) -> f64 {
+        self.inner.trust_region_grow_rho
+    }
+    #[getter]
+    fn trust_region_shrink_scale(&self) -> f64 {
+        self.inner.trust_region_shrink_scale
+    }
+    #[getter]
+    fn trust_region_grow_scale(&self) -> f64 {
+        self.inner.trust_region_grow_scale
+    }
+    #[getter]
+    fn log_c_clamp(&self) -> f64 {
+        self.inner.log_c_clamp
+    }
+    #[getter]
+    fn log_q_clamp(&self) -> Option<f64> {
+        self.inner.log_q_clamp
+    }
+    #[getter]
+    fn objective(&self) -> &'static str {
         match self.inner.objective {
             SolverObjective::Linear => "linear",
             SolverObjective::Log => "log",
@@ -300,7 +374,7 @@ impl PySystem {
             (Some(_), Some(_)) => {
                 return Err(PyValueError::new_err(
                     "cannot specify both temperature_C and temperature_K",
-                ))
+                ));
             }
         };
         let options = options.map(|o| o.inner).unwrap_or_default();
@@ -386,7 +460,9 @@ impl PySystem {
     ) -> PyResult<Py<Self>> {
         let energy = resolve_energy_spec(dg_st, delta_g_over_rt, dh_st, ds_st)?;
         let mut inner = slf.borrow_mut(py);
-        inner.complexes.push((name.to_string(), composition, energy));
+        inner
+            .complexes
+            .push((name.to_string(), composition, energy));
         drop(inner);
         Ok(slf)
     }
@@ -427,7 +503,10 @@ impl PySystem {
             builder = builder.complex(name, &comp_refs, dg);
         }
 
-        let mut sys = builder.options(self.options.clone()).build().map_err(map_err)?;
+        let mut sys = builder
+            .options(self.options.clone())
+            .build()
+            .map_err(map_err)?;
         let n_mon = sys.n_monomers();
         let n_species = sys.n_species();
         let monomer_names: Vec<String> = (0..n_mon)
@@ -496,8 +575,7 @@ impl PyEquilibrium {
         let free_monomer_concentrations: Vec<f64> = eq.free_monomers().to_vec();
         let complex_concentrations: Vec<f64> = eq.complexes().to_vec();
 
-        let mut concentrations =
-            HashMap::with_capacity(monomer_names.len() + complex_names.len());
+        let mut concentrations = HashMap::with_capacity(monomer_names.len() + complex_names.len());
         for (name, &conc) in monomer_names.iter().zip(&free_monomer_concentrations) {
             concentrations.insert(name.clone(), conc);
         }
@@ -596,7 +674,9 @@ impl PyEquilibrium {
     /// list of float
     ///     Concentrations in molar, monomers first, then complexes.
     fn values(&self) -> Vec<f64> {
-        self.ordered_names().map(|n| self.concentrations[n]).collect()
+        self.ordered_names()
+            .map(|n| self.concentrations[n])
+            .collect()
     }
 
     /// ``(name, concentration)`` pairs in deterministic order.
@@ -614,10 +694,13 @@ impl PyEquilibrium {
     /// Supports `for name in eq:`.
     fn __iter__(slf: PyRef<'_, Self>) -> PyResult<Py<EquilibriumKeyIter>> {
         let py = slf.py();
-        Py::new(py, EquilibriumKeyIter {
-            keys: slf.keys(),
-            index: 0,
-        })
+        Py::new(
+            py,
+            EquilibriumKeyIter {
+                keys: slf.keys(),
+                index: 0,
+            },
+        )
     }
 
     /// Free monomer concentrations as a list.

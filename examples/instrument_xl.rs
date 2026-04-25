@@ -116,8 +116,7 @@ fn time_coffee(s: &Synth) -> (f64, bool) {
         ..OptimizerArgs::default()
     };
     let t = Instant::now();
-    let mut opt =
-        Optimizer::new(&s.coffee_c0, &s.coffee_at, &s.coffee_q_nonexp, &args).unwrap();
+    let mut opt = Optimizer::new(&s.coffee_c0, &s.coffee_at, &s.coffee_q_nonexp, &args).unwrap();
     match opt.optimize(1.0) {
         Ok(_) => (t.elapsed().as_secs_f64(), true),
         Err(e) => {

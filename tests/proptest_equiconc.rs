@@ -1,4 +1,4 @@
-use equiconc::{SolverObjective, SolverOptions, SystemBuilder, R};
+use equiconc::{R, SolverObjective, SolverOptions, SystemBuilder};
 use proptest::prelude::*;
 
 const MONOMER_NAMES: [&str; 4] = ["A", "B", "C", "D"];
@@ -62,9 +62,7 @@ fn arb_system() -> impl Strategy<Value = SystemSpec> {
             (Just(temp), Just(n_mon), Just(concs), complexes)
         })
         .prop_map(|(temp, n_mon, concs, raw_complexes)| {
-            let monomers: Vec<_> = (0..n_mon)
-                .map(|i| (MONOMER_NAMES[i], concs[i]))
-                .collect();
+            let monomers: Vec<_> = (0..n_mon).map(|i| (MONOMER_NAMES[i], concs[i])).collect();
             let complexes: Vec<_> = raw_complexes
                 .into_iter()
                 .enumerate()
@@ -98,9 +96,7 @@ fn arb_monomer_only() -> impl Strategy<Value = SystemSpec> {
             (Just(temp), Just(n_mon), concs)
         })
         .prop_map(|(temp, n_mon, concs)| {
-            let monomers = (0..n_mon)
-                .map(|i| (MONOMER_NAMES[i], concs[i]))
-                .collect();
+            let monomers = (0..n_mon).map(|i| (MONOMER_NAMES[i], concs[i])).collect();
             SystemSpec {
                 temperature: temp,
                 monomers,

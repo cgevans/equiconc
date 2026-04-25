@@ -6,7 +6,7 @@
 //! optimum, so their equilibrium concentrations should agree to high precision.
 
 use coffee::{extras::OptimizerArgs, optimize::Optimizer};
-use equiconc::{SolverObjective, SolverOptions, SystemBuilder, R};
+use equiconc::{R, SolverObjective, SolverOptions, SystemBuilder};
 use ndarray::{Array1, Array2};
 use proptest::prelude::*;
 
@@ -67,18 +67,13 @@ fn arb_system() -> impl Strategy<Value = SystemSpec> {
         })
         .prop_flat_map(|(temp, n_mon, concs, n_cplx)| {
             let complexes = prop::collection::vec(
-                (
-                    prop::collection::vec(0..=3usize, n_mon),
-                    -40.0..=10.0f64,
-                ),
+                (prop::collection::vec(0..=3usize, n_mon), -40.0..=10.0f64),
                 n_cplx,
             );
             (Just(temp), Just(n_mon), Just(concs), complexes)
         })
         .prop_map(|(temp, n_mon, concs, raw_complexes)| {
-            let monomers: Vec<_> = (0..n_mon)
-                .map(|i| (MONOMER_NAMES[i], concs[i]))
-                .collect();
+            let monomers: Vec<_> = (0..n_mon).map(|i| (MONOMER_NAMES[i], concs[i])).collect();
             let complexes: Vec<_> = raw_complexes
                 .into_iter()
                 .enumerate()

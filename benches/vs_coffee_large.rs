@@ -189,8 +189,10 @@ fn bench_equiconc_log(bencher: &mut criterion::Bencher<'_>, tc: &TestcaseInputs)
 fn bench_coffee(bencher: &mut criterion::Bencher<'_>, tc: &TestcaseInputs) {
     let args = coffee_args();
     bencher.iter_batched(
-        || Optimizer::new(&tc.coffee_c0, &tc.coffee_at, &tc.coffee_q_nonexp, &args)
-            .expect("Optimizer::new"),
+        || {
+            Optimizer::new(&tc.coffee_c0, &tc.coffee_at, &tc.coffee_q_nonexp, &args)
+                .expect("Optimizer::new")
+        },
         |mut opt| {
             opt.optimize(1.0).unwrap();
         },
@@ -201,9 +203,7 @@ fn bench_coffee(bencher: &mut criterion::Bencher<'_>, tc: &TestcaseInputs) {
 fn bench_large_testcases(c: &mut Criterion) {
     let root = testcase_root();
     if !root.exists() {
-        eprintln!(
-            "testcase root {root:?} not found; set COFFEE_TESTCASES to override. Skipping."
-        );
+        eprintln!("testcase root {root:?} not found; set COFFEE_TESTCASES to override. Skipping.");
         return;
     }
 

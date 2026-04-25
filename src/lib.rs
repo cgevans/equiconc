@@ -147,7 +147,10 @@ impl std::fmt::Display for EquilibriumError {
             Self::UnknownMonomer(name) => write!(f, "unknown monomer: {name}"),
             Self::EmptyComposition => write!(f, "complex has empty composition"),
             Self::InvalidConcentration(c) => {
-                write!(f, "invalid concentration: {c} (must be finite and positive)")
+                write!(
+                    f,
+                    "invalid concentration: {c} (must be finite and positive)"
+                )
             }
             Self::InvalidTemperature(t) => {
                 write!(f, "invalid temperature: {t} (must be finite and positive)")
@@ -489,12 +492,7 @@ impl SystemBuilder {
     /// * `composition` — slice of `(monomer_name, count)` pairs
     /// * `dg` — ΔG° in **kcal/mol** at a **1 M standard state**
     #[must_use]
-    pub fn complex(
-        mut self,
-        name: &str,
-        composition: &[(&str, usize)],
-        dg: f64,
-    ) -> Self {
+    pub fn complex(mut self, name: &str, composition: &[(&str, usize)], dg: f64) -> Self {
         self.complexes.push((
             name.to_string(),
             composition
@@ -636,12 +634,12 @@ struct Names {
 /// and across consecutive [`System::solve`] calls.
 #[derive(Debug, Clone)]
 struct WorkBuffers {
-    c: Array1<f64>,        // n_species: concentrations at current λ
-    grad: Array1<f64>,     // n_mon: gradient (∇f, also for log path so the
-                           //         convergence test stays on the primal residual)
-    hessian: Array2<f64>,  // n_mon × n_mon: Hessian (H_f for linear, H_g for log)
+    c: Array1<f64>,    // n_species: concentrations at current λ
+    grad: Array1<f64>, // n_mon: gradient (∇f, also for log path so the
+    //         convergence test stays on the primal residual)
+    hessian: Array2<f64>, // n_mon × n_mon: Hessian (H_f for linear, H_g for log)
     lambda_new: Array1<f64>, // n_mon: candidate iterate
-    step: Array1<f64>,     // n_mon: trust-region step
+    step: Array1<f64>,    // n_mon: trust-region step
     full_step: Array1<f64>, // n_mon: stagnation-recovery step
     // --- log-objective scratch -----------------------------------------
     /// n_mon × n_mon: regularized Hessian `H_g + τ·I` for the log path.
@@ -659,10 +657,10 @@ struct WorkBuffers {
 struct DoglegBuffers {
     chol_l: Array2<f64>, // n_mon × n_mon: Cholesky factor
     chol_z: Array1<f64>, // n_mon: forward-substitution scratch
-    p_n: Array1<f64>,   // n_mon: Newton step
-    p_c: Array1<f64>,   // n_mon: Cauchy step
-    d: Array1<f64>,     // n_mon: p_n - p_c
-    hg: Array1<f64>,    // n_mon: H·g
+    p_n: Array1<f64>,    // n_mon: Newton step
+    p_c: Array1<f64>,    // n_mon: Cauchy step
+    d: Array1<f64>,      // n_mon: p_n - p_c
+    hg: Array1<f64>,     // n_mon: H·g
 }
 
 impl WorkBuffers {
@@ -727,8 +725,7 @@ fn compile(b: &SystemBuilder) -> Result<CompiledSystem, EquilibriumError> {
 
     let mut all_names: HashMap<&str, ()> = monomer_idx.keys().map(|&k| (k, ())).collect();
     let mut complex_names: Vec<String> = Vec::with_capacity(b.complexes.len());
-    let mut resolved_comps: Vec<Vec<(usize, usize)>> =
-        Vec::with_capacity(b.complexes.len());
+    let mut resolved_comps: Vec<Vec<(usize, usize)>> = Vec::with_capacity(b.complexes.len());
     let mut complex_dgs: Vec<f64> = Vec::with_capacity(b.complexes.len());
 
     for (name, composition, delta_g) in &b.complexes {
@@ -756,9 +753,10 @@ fn compile(b: &SystemBuilder) -> Result<CompiledSystem, EquilibriumError> {
             let &idx = monomer_idx
                 .get(monomer_name.as_str())
                 .ok_or_else(|| EquilibriumError::UnknownMonomer(monomer_name.clone()))?;
-            if let Some(entry) = comp.iter_mut().find(
-                |(existing_idx, _): &&mut (usize, usize)| *existing_idx == idx,
-            ) {
+            if let Some(entry) = comp
+                .iter_mut()
+                .find(|(existing_idx, _): &&mut (usize, usize)| *existing_idx == idx)
+            {
                 entry.1 += count;
             } else {
                 comp.push((idx, *count));
@@ -946,11 +944,7 @@ pub struct System {
 impl System {
     /// Assemble a `System` from a validated [`ProblemInputs`] and
     /// optional [`Names`]. Work buffers are allocated here.
-    fn from_inputs(
-        inputs: ProblemInputs,
-        names: Option<Names>,
-        options: SolverOptions,
-    ) -> Self {
+    fn from_inputs(inputs: ProblemInputs, names: Option<Names>, options: SolverOptions) -> Self {
         let n_mon = inputs.c0.len();
         let n_species = inputs.log_q.len();
         let work = WorkBuffers::new(n_mon, n_species);
@@ -1053,8 +1047,7 @@ impl System {
         validate_inputs(&inputs)?;
         let n_mon = inputs.c0.len();
         let n_species = inputs.log_q.len();
-        let species_index =
-            build_species_index(n_mon, n_species, &monomer_names, &species_names)?;
+        let species_index = build_species_index(n_mon, n_species, &monomer_names, &species_names)?;
         let names = Names {
             monomer_names,
             species_names,
@@ -1939,9 +1932,7 @@ fn solve_dual_into(
     opts: &SolverOptions,
 ) -> Result<SolverConvergence, EquilibriumError> {
     match opts.objective {
-        SolverObjective::Linear => {
-            solve_dual_linear_into(at, at_nz, log_q, c0, lambda, work, opts)
-        }
+        SolverObjective::Linear => solve_dual_linear_into(at, at_nz, log_q, c0, lambda, work, opts),
         SolverObjective::Log => solve_dual_log_into(at, at_nz, log_q, c0, lambda, work, opts),
     }
 }
@@ -2017,8 +2008,7 @@ fn solve_dual_linear_into(
         let f_new = evaluate_objective_into(at, log_q, c0, lambda_new, c, log_c_clamp);
 
         let actual_reduction = f - f_new;
-        let predicted_reduction =
-            -(grad.dot(&*step) + 0.5 * quadratic_form(hessian, &*step));
+        let predicted_reduction = -(grad.dot(&*step) + 0.5 * quadratic_form(hessian, &*step));
 
         if actual_reduction < 4.0 * f64::EPSILON * f.abs().max(1.0) {
             stagnation += 1;
@@ -2030,8 +2020,17 @@ fn solve_dual_linear_into(
             dogleg_step_into(grad, hessian, delta_max, full_step, dogleg);
             lambda_new.assign(lambda);
             *lambda_new += &*full_step;
-            let f_full =
-                evaluate_into(at, at_nz, log_q, c0, lambda_new, c, grad, hessian, log_c_clamp);
+            let f_full = evaluate_into(
+                at,
+                at_nz,
+                log_q,
+                c0,
+                lambda_new,
+                c,
+                grad,
+                hessian,
+                log_c_clamp,
+            );
             if f_full <= f {
                 std::mem::swap(lambda, lambda_new);
 
@@ -2187,9 +2186,7 @@ fn solve_dual_log_into(
         if !probe.f_positive {
             // Re-evaluate the linear objective at λ to populate grad/hessian
             // for the linear bootstrap step.
-            let _f_lin = evaluate_into(
-                at, at_nz, log_q, c0, lambda, c, grad, hessian, log_c_clamp,
-            );
+            let _f_lin = evaluate_into(at, at_nz, log_q, c0, lambda, c, grad, hessian, log_c_clamp);
             // One unconstrained Newton step on f. If Cholesky fails (it
             // shouldn't — H_f is PSD by construction), bail out: this
             // input is not log-tractable and shouldn't have used Log.
@@ -2239,9 +2236,7 @@ fn solve_dual_log_into(
 
         if trace {
             let g_inf = grad.iter().map(|gv: &f64| gv.abs()).fold(0.0_f64, f64::max);
-            eprintln!(
-                "{iter}\t{g:.15e}\t{f:.6e}\t{g_inf:.6e}\t{delta:.3e}\t-\t{stagnation}"
-            );
+            eprintln!("{iter}\t{g:.15e}\t{f:.6e}\t{g_inf:.6e}\t{delta:.3e}\t-\t{stagnation}");
         }
 
         // Convergence test on the *primal residual* — same criterion as
@@ -2289,8 +2284,7 @@ fn solve_dual_log_into(
             predicted_reduction = 1.0;
         } else {
             actual_reduction = g - cand.g;
-            predicted_reduction =
-                -(grad_g.dot(&*step) + 0.5 * quadratic_form(hessian_reg, &*step));
+            predicted_reduction = -(grad_g.dot(&*step) + 0.5 * quadratic_form(hessian_reg, &*step));
         }
 
         if actual_reduction < 4.0 * f64::EPSILON * g.abs().max(1.0) {
@@ -2312,7 +2306,16 @@ fn solve_dual_log_into(
             if accept {
                 std::mem::swap(lambda, lambda_new);
                 let _ = evaluate_log_into(
-                    at, at_nz, log_q, c0, lambda, c, grad, grad_g, hessian, log_c_clamp,
+                    at,
+                    at_nz,
+                    log_q,
+                    c0,
+                    lambda,
+                    c,
+                    grad,
+                    grad_g,
+                    hessian,
+                    log_c_clamp,
                 );
 
                 if grad
@@ -2341,7 +2344,16 @@ fn solve_dual_log_into(
             }
             // Recovery failed: re-evaluate at unchanged λ so c/grad reflect it.
             let _ = evaluate_log_into(
-                at, at_nz, log_q, c0, lambda, c, grad, grad_g, hessian, log_c_clamp,
+                at,
+                at_nz,
+                log_q,
+                c0,
+                lambda,
+                c,
+                grad,
+                grad_g,
+                hessian,
+                log_c_clamp,
             );
             if grad
                 .iter()
@@ -2382,7 +2394,16 @@ fn solve_dual_log_into(
     }
 
     let _ = evaluate_log_into(
-        at, at_nz, log_q, c0, lambda, c, grad, grad_g, hessian, log_c_clamp,
+        at,
+        at_nz,
+        log_q,
+        c0,
+        lambda,
+        c,
+        grad,
+        grad_g,
+        hessian,
+        log_c_clamp,
     );
     Err(EquilibriumError::ConvergenceFailure {
         iterations: max_iter,
@@ -2462,7 +2483,9 @@ mod tests {
             .options(opts)
             .build()
             .unwrap();
-        let eq = sys.solve().expect("log path must converge on +ΔG conformer");
+        let eq = sys
+            .solve()
+            .expect("log path must converge on +ΔG conformer");
 
         // Analytical: A + A* = c0; A*/A = exp(-dg/RT). So A = c0/(1+K).
         let k = (-dg / (R * 293.15)).exp();
@@ -2472,8 +2495,14 @@ mod tests {
         let a_got = eq.get("A").unwrap();
         let astar_got = eq.get("Astar").unwrap();
         assert!(a_got.is_finite() && astar_got.is_finite());
-        assert!((a_got - a_free).abs() < 1e-9 * c0, "A: got {a_got} want {a_free}");
-        assert!((astar_got - a_star).abs() < 1e-9 * c0, "A*: got {astar_got} want {a_star}");
+        assert!(
+            (a_got - a_free).abs() < 1e-9 * c0,
+            "A: got {a_got} want {a_free}"
+        );
+        assert!(
+            (astar_got - a_star).abs() < 1e-9 * c0,
+            "A*: got {astar_got} want {a_star}"
+        );
     }
 
     /// Coffee Bug 2 reproducer (`coffee-bugs.md` §"Bug 2: premature
@@ -2499,7 +2528,9 @@ mod tests {
             .options(opts)
             .build()
             .unwrap();
-        let eq = sys.solve().expect("log path must converge under strong binding");
+        let eq = sys
+            .solve()
+            .expect("log path must converge under strong binding");
 
         let a_free = eq.get("A").unwrap();
         let b_free = eq.get("B").unwrap();
@@ -2518,10 +2549,7 @@ mod tests {
             "B mass: got {b_total} (free {b_free} + 2·AB2 {ab2}), want {b0}"
         );
         // And specifically the failing predicate from coffee-bugs.md:
-        assert!(
-            a_free <= a0,
-            "A_free ({a_free}) must not exceed A_0 ({a0})"
-        );
+        assert!(a_free <= a0, "A_free ({a_free}) must not exceed A_0 ({a0})");
     }
 
     /// Coffee issue #2 reproducer (`coffee/docs/issue2-analysis.md`).
@@ -2548,7 +2576,9 @@ mod tests {
             .options(opts)
             .build()
             .unwrap();
-        let eq = sys.solve().expect("log path must converge on issue-#2 system");
+        let eq = sys
+            .solve()
+            .expect("log path must converge on issue-#2 system");
         let a_free = eq.get("A").unwrap();
         let b_free = eq.get("B").unwrap();
         let ab = eq.get("AB").unwrap();
@@ -2828,7 +2858,10 @@ mod tests {
     #[test]
     fn log_matches_linear_on_competing_system() {
         let build = |obj: SolverObjective| {
-            let opts = SolverOptions { objective: obj, ..Default::default() };
+            let opts = SolverOptions {
+                objective: obj,
+                ..Default::default()
+            };
             SystemBuilder::new()
                 .monomer("A", 200.0 * NM)
                 .monomer("B", 80.0 * NM)
@@ -2865,10 +2898,7 @@ mod tests {
 
     #[test]
     fn zero_concentration() {
-        let err = SystemBuilder::new()
-            .monomer("A", 0.0)
-            .build()
-            .unwrap_err();
+        let err = SystemBuilder::new().monomer("A", 0.0).build().unwrap_err();
         assert!(matches!(err, EquilibriumError::InvalidConcentration(c) if c == 0.0));
     }
 
@@ -2976,10 +3006,7 @@ mod tests {
 
     #[test]
     fn get_unknown_name() {
-        let mut sys = SystemBuilder::new()
-            .monomer("A", 1e-9)
-            .build()
-            .unwrap();
+        let mut sys = SystemBuilder::new().monomer("A", 1e-9).build().unwrap();
         let eq = sys.solve().unwrap();
         assert!(eq.get("nonexistent").is_none());
     }
@@ -2988,7 +3015,10 @@ mod tests {
     fn error_display() {
         let cases: Vec<(EquilibriumError, &str)> = vec![
             (EquilibriumError::NoMonomers, "no monomers"),
-            (EquilibriumError::UnknownMonomer("X".into()), "unknown monomer"),
+            (
+                EquilibriumError::UnknownMonomer("X".into()),
+                "unknown monomer",
+            ),
             (EquilibriumError::EmptyComposition, "empty composition"),
             (
                 EquilibriumError::InvalidConcentration(-1.0),
@@ -3100,10 +3130,7 @@ mod tests {
 
     #[test]
     fn empty_monomer_name() {
-        let err = SystemBuilder::new()
-            .monomer("", 1e-9)
-            .build()
-            .unwrap_err();
+        let err = SystemBuilder::new().monomer("", 1e-9).build().unwrap_err();
         assert!(matches!(err, EquilibriumError::EmptyName));
     }
 
@@ -3583,8 +3610,14 @@ mod tests {
 
         let unclamped_logq = sys_unclamped.log_q()[2];
         let clamped_logq = sys_clamped.log_q()[2];
-        assert!(unclamped_logq > 1000.0, "expected huge log_q, got {unclamped_logq}");
-        assert!((clamped_logq - 100.0).abs() < 1e-12, "clamp should cap at 100, got {clamped_logq}");
+        assert!(
+            unclamped_logq > 1000.0,
+            "expected huge log_q, got {unclamped_logq}"
+        );
+        assert!(
+            (clamped_logq - 100.0).abs() < 1e-12,
+            "clamp should cap at 100, got {clamped_logq}"
+        );
     }
 
     #[test]

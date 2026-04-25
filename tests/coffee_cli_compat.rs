@@ -135,10 +135,7 @@ fn run_testcase_vs_coffee(case_num: usize) {
         .join("testcases")
         .join(case_num.to_string());
     if !root.join("input.ocx").is_file() {
-        eprintln!(
-            "skipping: coffee testcase not found at {}",
-            root.display()
-        );
+        eprintln!("skipping: coffee testcase not found at {}", root.display());
         return;
     }
 
@@ -184,7 +181,11 @@ fn run_testcase_vs_coffee(case_num: usize) {
     let rows: Vec<Vec<f64>> = ocx_text
         .lines()
         .filter(|l| !l.trim().is_empty())
-        .map(|l| l.split_whitespace().map(|t| t.parse::<f64>().unwrap()).collect())
+        .map(|l| {
+            l.split_whitespace()
+                .map(|t| t.parse::<f64>().unwrap())
+                .collect()
+        })
         .collect();
     let n_species = rows.len();
 
@@ -294,14 +295,8 @@ fn run_testcase_vs_coffee(case_num: usize) {
     // re-derived from the CLI's output. Uses only species above an
     // appreciable concentration (1e-10 mol/L) so that print rounding
     // doesn't dominate.
-    let eq_bad_dual = count_bad_dual_above_cutoff(
-        &polymers,
-        &q_nonexp,
-        &equiconc_conc,
-        n_mon,
-        1e-10,
-        0.2,
-    );
+    let eq_bad_dual =
+        count_bad_dual_above_cutoff(&polymers, &q_nonexp, &equiconc_conc, n_mon, 1e-10, 0.2);
     assert!(
         eq_bad_dual == 0,
         "equiconc had {eq_bad_dual} non-clamped species above c=1e-10 with dual log-residual > 0.2"

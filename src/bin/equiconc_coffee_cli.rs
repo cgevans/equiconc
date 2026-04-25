@@ -73,8 +73,7 @@ fn density_water_molar(t_c: f64) -> f64 {
     const M_WATER_G_PER_MOL: f64 = 18.015_28_f64;
 
     let offset = t_c + A1;
-    let mass_density = RHO_MAX_KG_PER_M3
-        * (1.0 - offset * offset * (t_c + A2) / (A3 * (t_c + A4)));
+    let mass_density = RHO_MAX_KG_PER_M3 * (1.0 - offset * offset * (t_c + A2) / (A3 * (t_c + A4)));
     // kg/m³ ÷ g/mol = mol/L (1000 mol/m³ ÷ 1000 L/m³ · g/kg).
     mass_density / M_WATER_G_PER_MOL
 }
@@ -377,10 +376,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (stoich, dg) = parse_ocx(&cfe_content, n_mon)?;
     let n_species = stoich.nrows();
     if n_species < n_mon {
-        return Err(format!(
-            "need at least n_mon={n_mon} species in ocx (got {n_species})"
-        )
-        .into());
+        return Err(format!("need at least n_mon={n_mon} species in ocx (got {n_species})").into());
     }
 
     let rt = R_KCAL_PER_MOL_K * (T_CELSIUS + 273.15);
@@ -440,9 +436,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn read_file(path: &str, role: &str) -> Result<String, Box<dyn std::error::Error>> {
-    fs::read_to_string(Path::new(path)).map_err(|e| {
-        format!("failed to read {role} file {path}: {e}").into()
-    })
+    fs::read_to_string(Path::new(path))
+        .map_err(|e| format!("failed to read {role} file {path}: {e}").into())
 }
 
 fn main() -> ExitCode {

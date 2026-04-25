@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 struct Testcase {
-    at: Array2<f64>,           // n_species × n_mon
-    log_q: Array1<f64>,        // n_species (clamped, -ΔG/RT ≤ 230)
+    at: Array2<f64>,    // n_species × n_mon
+    log_q: Array1<f64>, // n_species (clamped, -ΔG/RT ≤ 230)
     c0: Array1<f64>,
     coffee_at: Array2<f64>,
     coffee_c0: Array1<f64>,
@@ -48,8 +48,7 @@ fn load(name: &str, dir: &Path) -> Testcase {
         .map(|l| {
             let f: Vec<&str> = l.split('\t').collect();
             assert_eq!(f.len(), n_mon + 3, "ocx width");
-            let counts: Vec<f64> =
-                f[2..2 + n_mon].iter().map(|s| s.parse().unwrap()).collect();
+            let counts: Vec<f64> = f[2..2 + n_mon].iter().map(|s| s.parse().unwrap()).collect();
             let energy: f64 = f[2 + n_mon].parse().unwrap();
             (counts, energy)
         })
@@ -75,9 +74,7 @@ fn load(name: &str, dir: &Path) -> Testcase {
         .expect("coffee_at shape");
     let coffee_c0 = Array1::from_vec(c0.to_vec());
 
-    eprintln!(
-        "Loaded testcase {name}: m={n_mon}, n_species={n_species}"
-    );
+    eprintln!("Loaded testcase {name}: m={n_mon}, n_species={n_species}");
     Testcase {
         at,
         log_q,
@@ -95,13 +92,9 @@ fn time_equiconc(tc: &Testcase) -> (usize, f64) {
         log_q_clamp: Some(LOG_Q_MAX),
         ..Default::default()
     };
-    let mut sys = System::from_arrays_with_options(
-        tc.at.clone(),
-        tc.log_q.clone(),
-        tc.c0.clone(),
-        opts,
-    )
-    .expect("build");
+    let mut sys =
+        System::from_arrays_with_options(tc.at.clone(), tc.log_q.clone(), tc.c0.clone(), opts)
+            .expect("build");
     let eq = sys.solve().expect("solve");
     let elapsed = t0.elapsed().as_secs_f64();
     let iters = eq.iterations();
@@ -118,16 +111,20 @@ fn time_coffee(tc: &Testcase) -> f64 {
         ..OptimizerArgs::default()
     };
     let t0 = Instant::now();
-    let mut opt =
-        Optimizer::new(&tc.coffee_c0, &tc.coffee_at, &tc.coffee_q_nonexp, &args)
-            .expect("Optimizer::new");
+    let mut opt = Optimizer::new(&tc.coffee_c0, &tc.coffee_at, &tc.coffee_q_nonexp, &args)
+        .expect("Optimizer::new");
     opt.optimize(1.0).expect("optimize");
     t0.elapsed().as_secs_f64()
 }
 
 /// Replicates equiconc's evaluate_into inner loop for measurement.
 /// Runs `reps` passes over the given data and returns per-phase totals.
-fn time_phases(at: &Array2<f64>, log_q: &Array1<f64>, lambda: &Array1<f64>, reps: usize) -> [f64; 4] {
+fn time_phases(
+    at: &Array2<f64>,
+    log_q: &Array1<f64>,
+    lambda: &Array1<f64>,
+    reps: usize,
+) -> [f64; 4] {
     let n_species = at.nrows();
     let n_mon = at.ncols();
     let mut c = Array1::<f64>::zeros(n_species);
@@ -220,9 +217,7 @@ fn main() {
 
     // Sparsity / composition density.
     let (avg_nnz, max_nnz) = count_nonzeros_per_row(&tc.at);
-    println!(
-        "\nStoichiometry density: avg {avg_nnz:.2} non-zeros per species row, max {max_nnz}"
-    );
+    println!("\nStoichiometry density: avg {avg_nnz:.2} non-zeros per species row, max {max_nnz}");
 
     // End-to-end solve timings + iteration counts.
     println!("\n== Full solve ==");
@@ -240,28 +235,14 @@ fn main() {
     // Using a moderate number of reps to amortize Instant overhead.
     let lambda_init = tc.c0.mapv(|c| c.ln());
     let reps = if tc.n_species > 10_000 { 10 } else { 200 };
-    println!(
-        "\n== equiconc evaluate_into phase breakdown (avg of {reps} reps at λ=ln(c0)) =="
-    );
+    println!("\n== equiconc evaluate_into phase breakdown (avg of {reps} reps at λ=ln(c0)) ==");
     let [t_fwd, t_exp, t_back, t_hess] = time_phases(&tc.at, &tc.log_q, &lambda_init, reps);
     let total_inner = t_fwd + t_exp + t_back + t_hess;
     let pct = |x: f64| format!("{:>5.1}%", 100.0 * x / total_inner);
-    println!(
-        "  Aᵀλ matvec : {:>8.3} ms  ({})",
-        t_fwd * 1e3,
-        pct(t_fwd)
-    );
+    println!("  Aᵀλ matvec : {:>8.3} ms  ({})", t_fwd * 1e3, pct(t_fwd));
     println!("  exp+add    : {:>8.3} ms  ({})", t_exp * 1e3, pct(t_exp));
-    println!(
-        "  Aᵀᵀc matvec: {:>8.3} ms  ({})",
-        t_back * 1e3,
-        pct(t_back)
-    );
-    println!(
-        "  Hessian    : {:>8.3} ms  ({})",
-        t_hess * 1e3,
-        pct(t_hess)
-    );
+    println!("  Aᵀᵀc matvec: {:>8.3} ms  ({})", t_back * 1e3, pct(t_back));
+    println!("  Hessian    : {:>8.3} ms  ({})", t_hess * 1e3, pct(t_hess));
     println!(
         "  ------------------------------\n  total inner: {:>8.3} ms",
         total_inner * 1e3

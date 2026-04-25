@@ -5,7 +5,7 @@
 
 use coffee::{extras::OptimizerArgs, optimize::Optimizer};
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
-use equiconc::{SolverObjective, SolverOptions, SystemBuilder, R};
+use equiconc::{R, SolverObjective, SolverOptions, SystemBuilder};
 use ndarray::{Array1, Array2};
 
 const TEMP_K: f64 = 298.15;
@@ -90,10 +90,7 @@ fn coffee_args() -> OptimizerArgs {
 /// Bench the equiconc solver alone: setup (clone the builder and validate
 /// + compile it into a `System`) is hoisted into `iter_batched`'s setup
 /// closure and is excluded from the measurement. Only `solve()` is timed.
-fn bench_equiconc(
-    bencher: &mut criterion::Bencher<'_>,
-    builder: &SystemBuilder,
-) {
+fn bench_equiconc(bencher: &mut criterion::Bencher<'_>, builder: &SystemBuilder) {
     bencher.iter_batched(
         || builder.clone().build().unwrap(),
         |mut sys| {
@@ -105,10 +102,7 @@ fn bench_equiconc(
 
 /// Bench the equiconc log-objective solver. Same as `bench_equiconc` but
 /// installs `SolverObjective::Log` on the cloned builder's options.
-fn bench_equiconc_log(
-    bencher: &mut criterion::Bencher<'_>,
-    builder: &SystemBuilder,
-) {
+fn bench_equiconc_log(bencher: &mut criterion::Bencher<'_>, builder: &SystemBuilder) {
     let opts = SolverOptions {
         objective: SolverObjective::Log,
         ..Default::default()
@@ -147,18 +141,20 @@ fn bench_monomer_scaling(c: &mut Criterion) {
         let ds = build_system(n_mon, n_cplx);
 
         let label = format!("m{n_mon}_n{n_cplx}");
-        group.bench_with_input(
-            BenchmarkId::new("equiconc_linear", &label), &ds,
-            |b, ds| bench_equiconc(b, &ds.equiconc),
-        );
-        group.bench_with_input(
-            BenchmarkId::new("equiconc_log", &label), &ds,
-            |b, ds| bench_equiconc_log(b, &ds.equiconc),
-        );
-        group.bench_with_input(
-            BenchmarkId::new("coffee", &label), &ds,
-            |b, ds| bench_coffee(b, &ds.coffee_monomers, &ds.coffee_polymers, &ds.coffee_q_nonexp),
-        );
+        group.bench_with_input(BenchmarkId::new("equiconc_linear", &label), &ds, |b, ds| {
+            bench_equiconc(b, &ds.equiconc)
+        });
+        group.bench_with_input(BenchmarkId::new("equiconc_log", &label), &ds, |b, ds| {
+            bench_equiconc_log(b, &ds.equiconc)
+        });
+        group.bench_with_input(BenchmarkId::new("coffee", &label), &ds, |b, ds| {
+            bench_coffee(
+                b,
+                &ds.coffee_monomers,
+                &ds.coffee_polymers,
+                &ds.coffee_q_nonexp,
+            )
+        });
     }
     group.finish();
 }
@@ -171,18 +167,20 @@ fn bench_complex_scaling(c: &mut Criterion) {
     for n_cplx in [6, 50, 100, 500, 1000] {
         let ds = build_system(n_mon, n_cplx);
         let label = format!("n{n_cplx}");
-        group.bench_with_input(
-            BenchmarkId::new("equiconc_linear", &label), &ds,
-            |b, ds| bench_equiconc(b, &ds.equiconc),
-        );
-        group.bench_with_input(
-            BenchmarkId::new("equiconc_log", &label), &ds,
-            |b, ds| bench_equiconc_log(b, &ds.equiconc),
-        );
-        group.bench_with_input(
-            BenchmarkId::new("coffee", &label), &ds,
-            |b, ds| bench_coffee(b, &ds.coffee_monomers, &ds.coffee_polymers, &ds.coffee_q_nonexp),
-        );
+        group.bench_with_input(BenchmarkId::new("equiconc_linear", &label), &ds, |b, ds| {
+            bench_equiconc(b, &ds.equiconc)
+        });
+        group.bench_with_input(BenchmarkId::new("equiconc_log", &label), &ds, |b, ds| {
+            bench_equiconc_log(b, &ds.equiconc)
+        });
+        group.bench_with_input(BenchmarkId::new("coffee", &label), &ds, |b, ds| {
+            bench_coffee(
+                b,
+                &ds.coffee_monomers,
+                &ds.coffee_polymers,
+                &ds.coffee_q_nonexp,
+            )
+        });
     }
     group.finish();
 }
@@ -195,18 +193,20 @@ fn bench_large_scale(c: &mut Criterion) {
     for n_cplx in [45, 100, 500, 1000, 5000] {
         let ds = build_system(n_mon, n_cplx);
         let label = format!("n{n_cplx}");
-        group.bench_with_input(
-            BenchmarkId::new("equiconc_linear", &label), &ds,
-            |b, ds| bench_equiconc(b, &ds.equiconc),
-        );
-        group.bench_with_input(
-            BenchmarkId::new("equiconc_log", &label), &ds,
-            |b, ds| bench_equiconc_log(b, &ds.equiconc),
-        );
-        group.bench_with_input(
-            BenchmarkId::new("coffee", &label), &ds,
-            |b, ds| bench_coffee(b, &ds.coffee_monomers, &ds.coffee_polymers, &ds.coffee_q_nonexp),
-        );
+        group.bench_with_input(BenchmarkId::new("equiconc_linear", &label), &ds, |b, ds| {
+            bench_equiconc(b, &ds.equiconc)
+        });
+        group.bench_with_input(BenchmarkId::new("equiconc_log", &label), &ds, |b, ds| {
+            bench_equiconc_log(b, &ds.equiconc)
+        });
+        group.bench_with_input(BenchmarkId::new("coffee", &label), &ds, |b, ds| {
+            bench_coffee(
+                b,
+                &ds.coffee_monomers,
+                &ds.coffee_polymers,
+                &ds.coffee_q_nonexp,
+            )
+        });
     }
     group.finish();
 }
@@ -286,14 +286,12 @@ fn bench_stiff(c: &mut Criterion) {
     for &(n_mon, n_cplx) in &[(4usize, 6usize), (4, 50), (6, 100), (8, 500), (10, 1000)] {
         let ds = build_stiff_system(n_mon, n_cplx);
         let label = format!("m{n_mon}_n{n_cplx}");
-        group.bench_with_input(
-            BenchmarkId::new("equiconc_linear", &label), &ds,
-            |b, ds| bench_equiconc(b, &ds.equiconc),
-        );
-        group.bench_with_input(
-            BenchmarkId::new("equiconc_log", &label), &ds,
-            |b, ds| bench_equiconc_log(b, &ds.equiconc),
-        );
+        group.bench_with_input(BenchmarkId::new("equiconc_linear", &label), &ds, |b, ds| {
+            bench_equiconc(b, &ds.equiconc)
+        });
+        group.bench_with_input(BenchmarkId::new("equiconc_log", &label), &ds, |b, ds| {
+            bench_equiconc_log(b, &ds.equiconc)
+        });
         // COFFEE may diverge or NaN on these inputs. Skip its bench when
         // a single solve fails; otherwise include it.
         let mut probe = Optimizer::new(
@@ -306,10 +304,14 @@ fn bench_stiff(c: &mut Criterion) {
         let coffee_ok = probe.optimize(1.0).is_ok()
             && probe.get_results().optimal_x.iter().all(|x| x.is_finite());
         if coffee_ok {
-            group.bench_with_input(
-                BenchmarkId::new("coffee", &label), &ds,
-                |b, ds| bench_coffee(b, &ds.coffee_monomers, &ds.coffee_polymers, &ds.coffee_q_nonexp),
-            );
+            group.bench_with_input(BenchmarkId::new("coffee", &label), &ds, |b, ds| {
+                bench_coffee(
+                    b,
+                    &ds.coffee_monomers,
+                    &ds.coffee_polymers,
+                    &ds.coffee_q_nonexp,
+                )
+            });
         } else {
             eprintln!("note: coffee skipped on {label} (non-convergent or NaN)");
         }
