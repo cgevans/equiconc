@@ -241,18 +241,13 @@ impl std::error::Error for EquilibriumError {}
 ///   optimum. The solver compensates with on-the-fly diagonal
 ///   regularization (modified Cholesky), guards `f > 0` at every iterate,
 ///   and refuses any step whose model predicts an ascent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum SolverObjective {
     /// Direct dual `f(λ)` (default; convex; always well-defined).
+    #[default]
     Linear,
     /// Log-dual `g(λ) = ln f(λ)` (faster on stiff systems; non-convex).
     Log,
-}
-
-impl Default for SolverObjective {
-    fn default() -> Self {
-        Self::Linear
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -358,6 +353,9 @@ impl SolverOptions {
     /// Does *not* reject pathological-but-legal combinations (e.g.
     /// `gradient_rel_tol = 0.5`). Those will still run, just probably
     /// not produce what the user wants.
+    // The `!(a < b)` form on the rho thresholds below is NaN-safe rejection;
+    // rewriting as `a >= b` would let NaN through.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     pub fn validate(&self) -> Result<(), EquilibriumError> {
         fn check_nonneg_finite(name: &str, v: f64) -> Result<(), EquilibriumError> {
             if !v.is_finite() || v < 0.0 {
@@ -436,6 +434,9 @@ impl SolverOptions {
 // SystemBuilder — high-level, name-based, validating
 // ---------------------------------------------------------------------------
 
+/// Builder spec for one complex: `(name, [(monomer_name, count), ...], ΔG° in kcal/mol)`.
+type ComplexSpec = (String, Vec<(String, usize)>, f64);
+
 /// High-level, name-keyed builder for an equilibrium-concentration problem.
 ///
 /// Chain [`SystemBuilder::monomer`] and [`SystemBuilder::complex`] calls
@@ -444,7 +445,7 @@ impl SolverOptions {
 #[derive(Debug, Clone)]
 pub struct SystemBuilder {
     monomers: Vec<(String, f64)>,
-    complexes: Vec<(String, Vec<(String, usize)>, f64)>,
+    complexes: Vec<ComplexSpec>,
     temperature: f64, // Kelvin
     options: SolverOptions,
 }
@@ -1574,6 +1575,10 @@ fn cholesky_solve_regularized_into(
 ///
 /// `at` is `n_species × n_mon` (= Aᵀ, row-major so that the `Aᵀλ` multiply
 /// reads contiguous rows).
+// Hot-path inner function takes pre-allocated buffer references from the
+// outer solver loop; bundling into a context struct adds lifetime noise
+// without measurable benefit.
+#[allow(clippy::too_many_arguments)]
 fn evaluate_into(
     at: &Array2<f64>,
     at_nz: &[Vec<(usize, f64)>],
@@ -1670,6 +1675,8 @@ struct LogEval {
 /// `c` and `grad` are still populated (so the caller can roll back to
 /// the previous iterate without re-evaluating), but `g`, `grad_g`, and
 /// `hessian` are not meaningful.
+// See note on `evaluate_into`: same hot-path buffer-passing pattern.
+#[allow(clippy::too_many_arguments)]
 fn evaluate_log_into(
     at: &Array2<f64>,
     at_nz: &[Vec<(usize, f64)>],
@@ -1724,7 +1731,7 @@ fn evaluate_log_into(
     ndarray::linalg::general_mat_vec_mul(1.0, &at.t(), c, 0.0, grad);
     *grad -= c0;
 
-    if !(f > 0.0) || !f.is_finite() {
+    if f <= 0.0 || !f.is_finite() {
         return LogEval {
             g: f64::NAN,
             f,
@@ -1795,7 +1802,7 @@ fn evaluate_objective_log_into(
     let lse = t_max + sum_shifted.ln();
 
     let f = lse.exp() - lambda.dot(c0);
-    if !(f > 0.0) || !f.is_finite() {
+    if f <= 0.0 || !f.is_finite() {
         return LogEval {
             g: f64::NAN,
             f,
@@ -3514,15 +3521,19 @@ mod tests {
 
     #[test]
     fn validate_rejects_bad_tolerances() {
-        let mut opts = SolverOptions::default();
-        opts.gradient_rel_tol = -1.0;
+        let opts = SolverOptions {
+            gradient_rel_tol: -1.0,
+            ..SolverOptions::default()
+        };
         assert!(matches!(
             opts.validate(),
             Err(EquilibriumError::InvalidOptions(_))
         ));
 
-        let mut opts = SolverOptions::default();
-        opts.gradient_abs_tol = f64::NAN;
+        let opts = SolverOptions {
+            gradient_abs_tol: f64::NAN,
+            ..SolverOptions::default()
+        };
         assert!(matches!(
             opts.validate(),
             Err(EquilibriumError::InvalidOptions(_))
@@ -3531,9 +3542,11 @@ mod tests {
 
     #[test]
     fn validate_rejects_bad_rho_thresholds() {
-        let mut opts = SolverOptions::default();
-        opts.trust_region_shrink_rho = 0.8;
-        opts.trust_region_grow_rho = 0.75;
+        let opts = SolverOptions {
+            trust_region_shrink_rho: 0.8,
+            trust_region_grow_rho: 0.75,
+            ..SolverOptions::default()
+        };
         assert!(matches!(
             opts.validate(),
             Err(EquilibriumError::InvalidOptions(_))
@@ -3542,15 +3555,19 @@ mod tests {
 
     #[test]
     fn validate_rejects_bad_scale_factors() {
-        let mut opts = SolverOptions::default();
-        opts.trust_region_shrink_scale = 1.5;
+        let opts = SolverOptions {
+            trust_region_shrink_scale: 1.5,
+            ..SolverOptions::default()
+        };
         assert!(matches!(
             opts.validate(),
             Err(EquilibriumError::InvalidOptions(_))
         ));
 
-        let mut opts = SolverOptions::default();
-        opts.trust_region_grow_scale = 0.9;
+        let opts = SolverOptions {
+            trust_region_grow_scale: 0.9,
+            ..SolverOptions::default()
+        };
         assert!(matches!(
             opts.validate(),
             Err(EquilibriumError::InvalidOptions(_))
@@ -3559,8 +3576,10 @@ mod tests {
 
     #[test]
     fn validate_rejects_zero_max_iterations() {
-        let mut opts = SolverOptions::default();
-        opts.max_iterations = 0;
+        let opts = SolverOptions {
+            max_iterations: 0,
+            ..SolverOptions::default()
+        };
         assert!(matches!(
             opts.validate(),
             Err(EquilibriumError::InvalidOptions(_))
@@ -3569,9 +3588,11 @@ mod tests {
 
     #[test]
     fn validate_rejects_delta_ordering() {
-        let mut opts = SolverOptions::default();
-        opts.initial_trust_region_radius = 100.0;
-        opts.max_trust_region_radius = 10.0;
+        let opts = SolverOptions {
+            initial_trust_region_radius: 100.0,
+            max_trust_region_radius: 10.0,
+            ..SolverOptions::default()
+        };
         assert!(matches!(
             opts.validate(),
             Err(EquilibriumError::InvalidOptions(_))

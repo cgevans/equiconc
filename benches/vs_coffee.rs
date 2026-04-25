@@ -87,9 +87,9 @@ fn coffee_args() -> OptimizerArgs {
     }
 }
 
-/// Bench the equiconc solver alone: setup (clone the builder and validate
-/// + compile it into a `System`) is hoisted into `iter_batched`'s setup
-/// closure and is excluded from the measurement. Only `solve()` is timed.
+/// Bench the equiconc solver alone: setup (clone the builder, validate, and
+/// compile it into a `System`) is hoisted into `iter_batched`'s setup closure
+/// and is excluded from the measurement. Only `solve()` is timed.
 fn bench_equiconc(bencher: &mut criterion::Bencher<'_>, builder: &SystemBuilder) {
     bencher.iter_batched(
         || builder.clone().build().unwrap(),

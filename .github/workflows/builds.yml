@@ -23,15 +23,16 @@ concurrency:
 
 jobs:
   lint:
-    name: Lint (fmt + rustdoc)
+    name: Lint (fmt + clippy + rustdoc)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
+      - run: cargo clippy --all-features --all-targets -- -D warnings
       - name: cargo doc (deny warnings)
         run: cargo doc --no-deps --all-features
         env:

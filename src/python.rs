@@ -327,6 +327,9 @@ impl PySolverOptions {
 // PySystem — deferred-construction wrapper
 // ---------------------------------------------------------------------------
 
+/// Spec for one complex on the Python side: `(name, [(monomer_name, count), ...], EnergySpec)`.
+type PyComplexSpec = (String, Vec<(String, usize)>, EnergySpec);
+
 /// Equilibrium concentration solver for nucleic acid strand systems.
 ///
 /// Build a system by chaining ``monomer()`` and ``complex()`` calls,
@@ -353,7 +356,7 @@ impl PySolverOptions {
 struct PySystem {
     temperature_k: Option<f64>,
     monomers: Vec<(String, f64)>,
-    complexes: Vec<(String, Vec<(String, usize)>, EnergySpec)>,
+    complexes: Vec<PyComplexSpec>,
     options: SolverOptions,
 }
 
@@ -447,6 +450,8 @@ impl PySystem {
     /// -------
     /// System
     ///     The same system instance, for method chaining.
+    // Signature is the Python-facing API; refactoring would change the binding.
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (name, composition, *, dg_st=None, delta_g_over_rt=None, dh_st=None, ds_st=None))]
     fn complex(
         slf: Py<Self>,

@@ -376,12 +376,11 @@ fn count_bad_dual_above_cutoff(
 fn parse_residual_from_log(log: &str) -> Option<f64> {
     // Line shape: "  mass-balance residual (max |c0 - Aᵀ·c|): 1.461e-15"
     for line in log.lines() {
-        if let Some(rest) = line.rsplit_once(':') {
-            if line.contains("mass-balance residual") {
-                if let Ok(v) = rest.1.trim().parse::<f64>() {
-                    return Some(v);
-                }
-            }
+        if let Some(rest) = line.rsplit_once(':')
+            && line.contains("mass-balance residual")
+            && let Ok(v) = rest.1.trim().parse::<f64>()
+        {
+            return Some(v);
         }
     }
     None

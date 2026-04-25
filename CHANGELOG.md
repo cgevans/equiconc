@@ -67,11 +67,11 @@
   Dev-dependencies (criterion, proptest, and the `cgevans/coffee` git
   dep used for cross-checks) are excluded via `[graph] exclude-dev`
   since they ship in neither the crate tarball nor the wheel.
-- CI lint job: `cargo fmt --all --check` and
+- CI lint job: `cargo fmt --all --check`,
+  `cargo clippy --all-features --all-targets -- -D warnings`, and
   `cargo doc --no-deps --all-features` with `RUSTDOCFLAGS=-D warnings`.
-  Catches formatting drift and broken intra-doc links ahead of a
-  docs.rs publish. (Clippy is *not* yet wired in; the codebase has a
-  pile of pre-existing findings to triage first.)
+  Catches formatting drift, clippy regressions, and broken intra-doc
+  links ahead of a docs.rs publish.
 - CI cross-platform / cross-Python smoke tests (`tests-matrix` job):
   the existing `tests` job runs only on Linux + Python 3.12 because of
   the cargo-llvm-cov coverage instrumentation; the new matrix exercises
@@ -87,6 +87,21 @@
 - `cargo fmt --all` sweep across `src/`, `tests/`, `benches/`, and
   `examples/`. No behavior change; lands ahead of the new
   `cargo fmt --check` CI gate so the gate starts green.
+- Clippy cleanup so `cargo clippy --all-features --all-targets -- -D warnings`
+  passes. Mechanical fixes: derive `Default` on `SolverObjective`;
+  collapse `field_reassign_with_default` patterns in tests into struct
+  literals; rewrite `!(f > 0.0) || !f.is_finite()` as
+  `f <= 0.0 || !f.is_finite()` (NaN-equivalent, clippy-clean);
+  `iter().copied().collect()` → `to_vec()`; minor doc-comment
+  re-indentation in benches; `for i in 0..n` index loop → `enumerate`;
+  collapse nested `if let` into a Rust 2024 let-chain. Type aliases
+  `ComplexSpec` / `PyComplexSpec` introduced for the `Vec<(String,
+  Vec<(String, usize)>, _)>` builder fields. `#[allow]` annotations
+  with one-line comments where the lint can't tell the code is
+  intentional: NaN-safe `!(a < b)` rho ordering check in
+  `SolverOptions::validate`; `too_many_arguments` on the
+  `evaluate_into` / `evaluate_log_into` hot-path inner functions and
+  on the pyo3-bound `PySystem::complex` method.
 - `builds.yml` now uses `concurrency: cancel-in-progress` keyed on
   `${{ github.ref }}` for `pull_request` events, so superseded PR runs
   are cancelled. Tag and main pushes are unaffected.

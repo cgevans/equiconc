@@ -8,7 +8,7 @@
 //! File format:
 //! - `input.con`: one monomer concentration per line (`n_mon` lines)
 //! - `input.ocx`: tab-separated, one row per species. NUPACK layout:
-//!     `id \t size \t count_1 \t ... \t count_m \t energy`
+//!   `id \t size \t count_1 \t ... \t count_m \t energy`
 //!   where `energy` is ΔG/RT (0 for free monomers). The first `n_mon`
 //!   rows are the identity block.
 
@@ -93,15 +93,15 @@ fn load_testcase(name: &str, dir: &Path) -> TestcaseInputs {
     let n_species = rows.len();
 
     // Sanity: first n_mon rows are the identity block.
-    for i in 0..n_mon {
+    for (i, row) in rows.iter().take(n_mon).enumerate() {
         for j in 0..n_mon {
             let expected = if i == j { 1.0 } else { 0.0 };
             assert_eq!(
-                rows[i].0[j], expected,
+                row.0[j], expected,
                 "non-identity in monomer row {i}, col {j}"
             );
         }
-        assert_eq!(rows[i].1, 0.0, "non-zero energy on monomer row {i}");
+        assert_eq!(row.1, 0.0, "non-zero energy on monomer row {i}");
     }
 
     let mut at = Array2::zeros((n_species, n_mon));

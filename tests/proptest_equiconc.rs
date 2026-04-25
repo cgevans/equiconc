@@ -7,12 +7,14 @@ const REL_TOL: f64 = 1e-4;
 /// dominates the relative tolerance.
 const ATOL: f64 = 1e-14;
 
+type ComplexSpec = (String, Vec<(&'static str, usize)>, f64);
+
 /// Metadata about a generated system for verifying physical invariants.
 #[derive(Debug, Clone)]
 struct SystemSpec {
     temperature: f64,
     monomers: Vec<(&'static str, f64)>,
-    complexes: Vec<(String, Vec<(&'static str, usize)>, f64)>,
+    complexes: Vec<ComplexSpec>,
 }
 
 impl SystemSpec {
@@ -29,7 +31,7 @@ impl SystemSpec {
             b = b.monomer(name, conc);
         }
         for (name, comp, dg) in &self.complexes {
-            let comp_refs: Vec<(&str, usize)> = comp.iter().copied().collect();
+            let comp_refs: Vec<(&str, usize)> = comp.to_vec();
             b = b.complex(name, &comp_refs, *dg);
         }
         let opts = SolverOptions {
