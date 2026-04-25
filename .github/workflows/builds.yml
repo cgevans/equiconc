@@ -17,13 +17,13 @@ permissions:
 
 jobs:
   cargo-deny:
-    name: cargo-deny (licenses)
+    name: cargo-deny (licenses, advisories, sources)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          command: check licenses
+          command: check licenses advisories sources
 
   tests:
     runs-on: ubuntu-latest

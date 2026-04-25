@@ -28,3 +28,19 @@ allow = [
     "Unicode-3.0",                      # unicode-ident (transitively via syn)
 ]
 confidence-threshold = 0.93
+
+[advisories]
+# Fail on any RustSec advisory affecting the runtime tree
+# (vulnerabilities, unmaintained crates, unsound code, yanked versions).
+# Add an entry to `ignore` with a comment if a specific advisory is known
+# to not affect equiconc or is awaiting an upstream fix.
+version = 2
+ignore = []
+
+[sources]
+# Refuse runtime crates that come from anywhere other than the default
+# crates.io registry. The `cgevans/coffee` git dep is dev-only and is
+# excluded by `[graph] exclude-dev = true`, so no git source allowlist
+# is needed here.
+unknown-registry = "deny"
+unknown-git = "deny"

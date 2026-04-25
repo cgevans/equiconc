@@ -4,9 +4,10 @@ default:
 
 venv := justfile_directory() / ".venv"
 
-# License check on the runtime dependency tree (cargo-deny)
+# Supply-chain checks on the runtime dependency tree (cargo-deny):
+# license allow-list, RustSec advisories, and source registry.
 deny:
-    cargo deny check licenses
+    cargo deny check licenses advisories sources
 
 # Rust coverage from Rust tests
 coverage-rust:
