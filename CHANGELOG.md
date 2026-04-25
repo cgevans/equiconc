@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-25
+
 ### Added
 
 - `System::solve_with_progress(on_iter)` / `IterationStatus` /
@@ -20,16 +22,21 @@
   JS code, all compute runs in WebAssembly via the unmodified
   `equiconc` solver. The page exposes the full `SolverOptions`
   surface tiered Basic / Advanced / Expert, includes
-  `equiconc-defaults` and `COFFEE-compatible` preset buttons,
-  drag-and-drop file loading for `.cfe` / `.ocx` / `.con`, baked-in
-  testcases, sortable concentrations table with per-monomer
-  share-of-mass, hand-rolled SVG pie + share-of-mass bar charts,
-  a live convergence chart (log₁₀ ‖∇‖ vs. iteration), and
-  TSV / CSV / JSON-report exports. The solve runs in a dedicated
-  Web Worker so the UI thread stays responsive; a Cancel button
-  terminates the worker mid-iteration. New `just web` and
-  `just web-dev` recipes; new CI job builds and uploads the dist
-  artifact, and `main` / tag pushes deploy to GitHub Pages.
+  `equiconc-defaults` and `COFFEE-compatible` preset buttons, a
+  kcal/mol vs RT energy-units toggle (with the temperature input
+  hiding itself when not consumed), drag-and-drop file loading for
+  `.cfe` / `.ocx` / `.con`, baked-in testcases, sortable concentrations
+  table with per-monomer share-of-mass and 100-row pagination for
+  COFFEE-scale 50k-species systems, a horizontal bar chart of top
+  species by absolute concentration, a per-monomer share-of-mass
+  stacked bar chart, a compact live convergence chart
+  (log₁₀ ‖∇‖ vs. iteration), and TSV / CSV / JSON-report exports.
+  The solve runs in a dedicated Web Worker so the UI thread stays
+  responsive; a Cancel button terminates the worker mid-iteration.
+  New `just web` and `just web-dev` recipes; CI builds the dist
+  artifact and on `main` / tag pushes deploys it to GitHub Pages
+  alongside the docs (docs at the project URL root, web app at
+  `/app/`).
 - `pub mod equiconc::io` with `parse_cfe(text, n_mon)` and
   `parse_concentrations(text)` parsers for NUPACK-style complex
   tables (`.cfe` / `.ocx`, with NUPACK header auto-detection) and
