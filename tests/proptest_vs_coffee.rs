@@ -6,7 +6,7 @@
 //! optimum, so their equilibrium concentrations should agree to high precision.
 
 use coffee::{extras::OptimizerArgs, optimize::Optimizer};
-use equiconc::{SystemBuilder, R};
+use equiconc::{SolverObjective, SolverOptions, SystemBuilder, R};
 use ndarray::{Array1, Array2};
 use proptest::prelude::*;
 
@@ -32,6 +32,13 @@ struct SystemSpec {
 
 impl SystemSpec {
     fn build(&self) -> Result<equiconc::System, equiconc::EquilibriumError> {
+        self.build_with(SolverObjective::Linear)
+    }
+
+    fn build_with(
+        &self,
+        objective: SolverObjective,
+    ) -> Result<equiconc::System, equiconc::EquilibriumError> {
         let mut b = SystemBuilder::new().temperature(self.temperature);
         for &(name, conc) in &self.monomers {
             b = b.monomer(name, conc);
@@ -40,7 +47,11 @@ impl SystemSpec {
             let comp_refs: Vec<(&str, usize)> = comp.iter().copied().collect();
             b = b.complex(name, &comp_refs, *dg);
         }
-        b.build()
+        let opts = SolverOptions {
+            objective,
+            ..Default::default()
+        };
+        b.options(opts).build()
     }
 }
 
@@ -218,6 +229,55 @@ proptest! {
                 name,
                 eq_val,
                 coffee_val,
+                (eq_val - coffee_val).abs() / eq_val.max(coffee_val).max(1e-30)
+            );
+        }
+    }
+
+    /// Same cross-check, but for equiconc's log objective. The point is
+    /// to verify that *equiconc's* log path agrees with COFFEE on every
+    /// system COFFEE handles correctly — i.e., we deliver the speed of
+    /// log(L) without inheriting any of COFFEE's documented failure modes.
+    /// Cases where COFFEE diverges/produces NaN are skipped (handled by
+    /// `solve_with_coffee` returning `None`).
+    #[test]
+    fn prop_equiconc_log_matches_coffee(spec in arb_system()) {
+        prop_assume!(!spec.complexes.is_empty());
+
+        let mut sys = spec.build_with(SolverObjective::Log).unwrap();
+        let eq = match sys.solve() {
+            Ok(eq) => eq,
+            // Don't penalize legitimate solver failures (extreme
+            // ill-conditioning, etc.) — those are tracked separately.
+            Err(_) => return Ok(()),
+        };
+
+        let coffee_concs = match solve_with_coffee(&spec) {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+
+        let n_mon = spec.monomers.len();
+
+        for (i, &(name, _)) in spec.monomers.iter().enumerate() {
+            let eq_val = eq.get(name).unwrap();
+            let coffee_val = coffee_concs[i];
+            prop_assert!(
+                concentrations_agree(eq_val, coffee_val),
+                "Free monomer {} disagrees (log objective): equiconc={:.6e}, coffee={:.6e}, \
+                 rel_err={:.2e}",
+                name, eq_val, coffee_val,
+                (eq_val - coffee_val).abs() / eq_val.max(coffee_val).max(1e-30)
+            );
+        }
+        for (k, (name, _, _)) in spec.complexes.iter().enumerate() {
+            let eq_val = eq.get(name).unwrap();
+            let coffee_val = coffee_concs[n_mon + k];
+            prop_assert!(
+                concentrations_agree(eq_val, coffee_val),
+                "Complex {} disagrees (log objective): equiconc={:.6e}, coffee={:.6e}, \
+                 rel_err={:.2e}",
+                name, eq_val, coffee_val,
                 (eq_val - coffee_val).abs() / eq_val.max(coffee_val).max(1e-30)
             );
         }

@@ -1,4 +1,4 @@
-use equiconc::{SystemBuilder, R};
+use equiconc::{SolverObjective, SolverOptions, SystemBuilder, R};
 use proptest::prelude::*;
 
 const MONOMER_NAMES: [&str; 4] = ["A", "B", "C", "D"];
@@ -17,6 +17,13 @@ struct SystemSpec {
 
 impl SystemSpec {
     fn build(&self) -> Result<equiconc::System, equiconc::EquilibriumError> {
+        self.build_with(SolverObjective::Linear)
+    }
+
+    fn build_with(
+        &self,
+        objective: SolverObjective,
+    ) -> Result<equiconc::System, equiconc::EquilibriumError> {
         let mut b = SystemBuilder::new().temperature(self.temperature);
         for &(name, conc) in &self.monomers {
             b = b.monomer(name, conc);
@@ -25,7 +32,11 @@ impl SystemSpec {
             let comp_refs: Vec<(&str, usize)> = comp.iter().copied().collect();
             b = b.complex(name, &comp_refs, *dg);
         }
-        b.build()
+        let opts = SolverOptions {
+            objective,
+            ..Default::default()
+        };
+        b.options(opts).build()
     }
 }
 
@@ -226,5 +237,48 @@ proptest! {
         check(a_conc, free, "[A]")?;
         check(b_conc, free, "[B]")?;
         check(ab_conc, x, "[AB]")?;
+    }
+
+    /// Cross-check between objectives: the linear and log paths share a
+    /// unique minimizer (the convex dual has only one), so for every
+    /// system both can solve, their concentrations must agree to within
+    /// the convergence tolerance. This is the property-based version of
+    /// the in-module `log_matches_linear_on_competing_system` test, run
+    /// on every system the random generator emits.
+    #[test]
+    fn prop_log_matches_linear(spec in arb_system()) {
+        let mut lin = spec.build_with(SolverObjective::Linear).unwrap();
+        let mut log = spec.build_with(SolverObjective::Log).unwrap();
+        let lin_eq = match lin.solve() {
+            Ok(eq) => eq,
+            Err(_) => return Ok(()), // skip: linear couldn't solve either
+        };
+        let log_eq = match log.solve() {
+            Ok(eq) => eq,
+            Err(_) => return Ok(()), // skip: log path couldn't solve
+        };
+
+        for &(mon_name, _) in &spec.monomers {
+            let a = lin_eq.get(mon_name).unwrap();
+            let b = log_eq.get(mon_name).unwrap();
+            let abs_err = (a - b).abs();
+            let tol = ATOL + REL_TOL * a.max(b).abs();
+            prop_assert!(
+                abs_err < tol,
+                "monomer {} disagrees: linear={:.6e}, log={:.6e}, abs_err={:.2e} (tol={:.2e})",
+                mon_name, a, b, abs_err, tol
+            );
+        }
+        for (cplx_name, _, _) in &spec.complexes {
+            let a = lin_eq.get(cplx_name).unwrap();
+            let b = log_eq.get(cplx_name).unwrap();
+            let abs_err = (a - b).abs();
+            let tol = ATOL + REL_TOL * a.max(b).abs();
+            prop_assert!(
+                abs_err < tol,
+                "complex {} disagrees: linear={:.6e}, log={:.6e}, abs_err={:.2e} (tol={:.2e})",
+                cplx_name, a, b, abs_err, tol
+            );
+        }
     }
 }

@@ -14,7 +14,7 @@
 
 use coffee::{extras::OptimizerArgs, optimize::Optimizer};
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
-use equiconc::{SolverOptions, System};
+use equiconc::{SolverObjective, SolverOptions, System};
 use ndarray::{Array1, Array2};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -148,12 +148,17 @@ fn coffee_args() -> OptimizerArgs {
     }
 }
 
-fn bench_equiconc(bencher: &mut criterion::Bencher<'_>, tc: &TestcaseInputs) {
+fn bench_equiconc_with(
+    bencher: &mut criterion::Bencher<'_>,
+    tc: &TestcaseInputs,
+    objective: SolverObjective,
+) {
     // Build a fresh System per batch (allocates work buffers and seeds λ
     // = ln(c0)); the timed body is just solve(). This mirrors what
     // bench_coffee does with Optimizer::new in its setup.
     let opts = SolverOptions {
         log_q_clamp: Some(230.0),
+        objective,
         ..Default::default()
     };
     bencher.iter_batched(
@@ -171,6 +176,14 @@ fn bench_equiconc(bencher: &mut criterion::Bencher<'_>, tc: &TestcaseInputs) {
         },
         BatchSize::SmallInput,
     );
+}
+
+fn bench_equiconc(bencher: &mut criterion::Bencher<'_>, tc: &TestcaseInputs) {
+    bench_equiconc_with(bencher, tc, SolverObjective::Linear);
+}
+
+fn bench_equiconc_log(bencher: &mut criterion::Bencher<'_>, tc: &TestcaseInputs) {
+    bench_equiconc_with(bencher, tc, SolverObjective::Log);
 }
 
 fn bench_coffee(bencher: &mut criterion::Bencher<'_>, tc: &TestcaseInputs) {
@@ -208,8 +221,11 @@ fn bench_large_testcases(c: &mut Criterion) {
         let tc = load_testcase(name, &dir);
         let label = format!("{}_m{}_n{}", tc.name, tc.n_mon, tc.n_species - tc.n_mon);
 
-        group.bench_with_input(BenchmarkId::new("equiconc", &label), &tc, |b, tc| {
+        group.bench_with_input(BenchmarkId::new("equiconc_linear", &label), &tc, |b, tc| {
             bench_equiconc(b, tc);
+        });
+        group.bench_with_input(BenchmarkId::new("equiconc_log", &label), &tc, |b, tc| {
+            bench_equiconc_log(b, tc);
         });
         group.bench_with_input(BenchmarkId::new("coffee", &label), &tc, |b, tc| {
             bench_coffee(b, tc);
