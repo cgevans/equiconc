@@ -97,17 +97,19 @@ jobs:
             os: ubuntu-latest
             python-version: "3.13t"
             # abi3-py310 doesn't apply on free-threaded; opt out of the
-            # crate default features and turn `python` and `simd` on
-            # explicitly, matching the free-threaded wheel build below.
-            maturin-extra: "--no-default-features --features python,simd"
+            # crate default features and turn on `python` explicitly,
+            # matching the free-threaded wheel build below.
+            maturin-extra: "--no-default-features --features python"
             cargo-test-extra: ""
-          - label: linux-py3.12-no-simd
+          - label: linux-py3.12-simd
             os: ubuntu-latest
             python-version: "3.12"
-            # Smoke test the scalar-only path so a regression in the
-            # `simd` opt-out gate is caught here rather than at release.
-            maturin-extra: "--no-default-features --features python"
-            cargo-test-extra: "--no-default-features"
+            # Smoke test the opt-in `simd` feature end-to-end so a
+            # regression in the SIMD path is caught here rather than at
+            # release. (lint already runs `cargo clippy --all-features`,
+            # but that's compile-only.)
+            maturin-extra: "--features simd"
+            cargo-test-extra: "--features simd"
           - label: macos-py3.12
             os: macos-latest
             python-version: "3.12"
@@ -187,7 +189,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --interpreter ${{ steps.interp.outputs.path }} --no-default-features --features python,simd
+          args: --release --out dist --interpreter ${{ steps.interp.outputs.path }} --no-default-features --features python
           sccache: "true"
           manylinux: auto
       - name: Upload wheels
@@ -248,7 +250,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --interpreter python3 --no-default-features --features python,simd
+          args: --release --out dist --interpreter python3 --no-default-features --features python
           sccache: "true"
           rust-toolchain: stable
       - name: Upload wheels
@@ -311,7 +313,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --interpreter python3 --no-default-features --features python,simd
+          args: --release --out dist --interpreter python3 --no-default-features --features python
           sccache: "true"
           rust-toolchain: stable
       - name: Upload wheels

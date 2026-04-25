@@ -44,12 +44,13 @@ proptest = "1"
 coffee = { git = "https://github.com/cgevans/coffee", rev = "6fdcd67a5e50a306b038c22f4e4d7547c1668261", default-features = false }
 
 [features]
-default = ["simd"]
+default = []
 python = ["pyo3"]
 coffee-cli = ["dep:clap"]
 # Vectorize the per-species element-wise hot loops in evaluate_into and
-# evaluate_log_into via `pulp` (runtime-dispatch SIMD). Default-on; opt
-# out with `--no-default-features` to fall back to the scalar libm path.
+# evaluate_log_into via `pulp` (runtime-dispatch SIMD). Opt-in: enable
+# with `cargo build --features simd` (or `--features python,simd` for
+# the Python wheel) to get the polynomial-exp linear-path speedup.
 simd = ["dep:pulp"]
 
 [[bin]]

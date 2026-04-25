@@ -4,24 +4,25 @@
 
 ### Added
 
-- New `simd` Cargo feature (default-on) that vectorizes the per-species
-  element-wise hot loops in `evaluate_into` and `evaluate_log_into` via
-  `pulp` runtime ISA dispatch (SSE2 / AVX2 / AVX-512 on x86, NEON on
-  aarch64, scalar on wasm). Translates to ~9% end-to-end speedup on the
-  COFFEE-large `equiconc_linear` testcases, and preserves scalar
-  performance on `equiconc_log`. Opt out with
-  `--no-default-features` to fall back to the pre-0.4 scalar path.
+- New `simd` Cargo feature (opt-in, off by default) that vectorizes
+  the per-species element-wise hot loops in `evaluate_into` and
+  `evaluate_log_into` via `pulp` runtime ISA dispatch (SSE2 / AVX2 /
+  AVX-512 on x86, NEON on aarch64, scalar on wasm). Enable with
+  `cargo build --features simd` (or `--features python,simd` for the
+  Python wheel). Translates to ~9% end-to-end speedup on the
+  COFFEE-large `equiconc_linear` testcases; preserves scalar
+  performance on `equiconc_log`.
 
   Numerical contract: linear-path kernels use a degree-12 Taylor
-  polynomial after Cody-Waite range reduction (≤2 ulps vs libm); log
-  -path kernels keep parallelism for everything around the `exp` call
-  but route the exp itself through scalar libm per lane, because the
-  trust-region step acceptance on `g = ln f` requires per-iteration
-  progress measurable above `4·eps·|g|` and the polynomial residual
-  stalls the iteration on extremely stiff systems (COFFEE testcase 0
-  with sub-nanomolar `c0` and ~54k species was the canonical failure).
-  The full and candidate evaluators always agree on rounding so the
-  trust-region ρ check stays consistent.
+  polynomial after Cody-Waite range reduction (≤2 ulps vs libm);
+  log-path kernels keep parallelism for everything around the `exp`
+  call but route the exp itself through scalar libm per lane, because
+  the trust-region step acceptance on `g = ln f` requires
+  per-iteration progress measurable above `4·eps·|g|` and the
+  polynomial residual stalls the iteration on extremely stiff systems
+  (COFFEE testcase 0 with sub-nanomolar `c0` and ~54k species was the
+  canonical failure). The full and candidate evaluators always agree
+  on rounding so the trust-region ρ check stays consistent.
 
 ## [0.3.0] - 2026-04-25
 
