@@ -1,4 +1,4 @@
-from typing import Iterator, overload
+from typing import Iterator, Literal, overload
 
 class SolverOptions:
     """Solver configuration: tolerances, iteration caps, trust-region
@@ -23,6 +23,7 @@ class SolverOptions:
         trust_region_grow_scale: float | None = None,
         log_c_clamp: float | None = None,
         log_q_clamp: float | None = None,
+        objective: Literal["linear", "log"] | None = None,
     ) -> None: ...
     @property
     def max_iterations(self) -> int: ...
@@ -54,6 +55,8 @@ class SolverOptions:
     def log_c_clamp(self) -> float: ...
     @property
     def log_q_clamp(self) -> float | None: ...
+    @property
+    def objective(self) -> Literal["linear", "log"]: ...
     def __repr__(self) -> str: ...
 
 class System:
