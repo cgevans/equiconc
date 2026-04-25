@@ -1,5 +1,61 @@
 from typing import Iterator, overload
 
+class SolverOptions:
+    """Solver configuration: tolerances, iteration caps, trust-region
+    parameters, and numerical clamps.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_iterations: int | None = None,
+        gradient_abs_tol: float | None = None,
+        gradient_rel_tol: float | None = None,
+        relaxed_gradient_abs_tol: float | None = None,
+        relaxed_gradient_rel_tol: float | None = None,
+        stagnation_threshold: int | None = None,
+        initial_trust_region_radius: float | None = None,
+        max_trust_region_radius: float | None = None,
+        step_accept_threshold: float | None = None,
+        trust_region_shrink_rho: float | None = None,
+        trust_region_grow_rho: float | None = None,
+        trust_region_shrink_scale: float | None = None,
+        trust_region_grow_scale: float | None = None,
+        log_c_clamp: float | None = None,
+        log_q_clamp: float | None = None,
+    ) -> None: ...
+    @property
+    def max_iterations(self) -> int: ...
+    @property
+    def gradient_abs_tol(self) -> float: ...
+    @property
+    def gradient_rel_tol(self) -> float: ...
+    @property
+    def relaxed_gradient_abs_tol(self) -> float: ...
+    @property
+    def relaxed_gradient_rel_tol(self) -> float: ...
+    @property
+    def stagnation_threshold(self) -> int: ...
+    @property
+    def initial_trust_region_radius(self) -> float: ...
+    @property
+    def max_trust_region_radius(self) -> float: ...
+    @property
+    def step_accept_threshold(self) -> float: ...
+    @property
+    def trust_region_shrink_rho(self) -> float: ...
+    @property
+    def trust_region_grow_rho(self) -> float: ...
+    @property
+    def trust_region_shrink_scale(self) -> float: ...
+    @property
+    def trust_region_grow_scale(self) -> float: ...
+    @property
+    def log_c_clamp(self) -> float: ...
+    @property
+    def log_q_clamp(self) -> float | None: ...
+    def __repr__(self) -> str: ...
+
 class System:
     """Equilibrium concentration solver for nucleic acid strand systems.
 
@@ -30,6 +86,7 @@ class System:
         *,
         temperature_C: float | None = None,
         temperature_K: float | None = None,
+        options: SolverOptions | None = None,
     ) -> None: ...
     def monomer(self, name: str, total_concentration: float) -> System:
         """Add a monomer species with a given total concentration.

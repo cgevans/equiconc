@@ -8,8 +8,6 @@
 use coffee::{extras::OptimizerArgs, optimize::Optimizer};
 use equiconc::{R, System};
 use ndarray::{Array1, Array2};
-// COFFEE's public API takes ndarray 0.16; equiconc is on 0.17.
-use ndarray_coffee::{Array1 as CArray1, Array2 as CArray2};
 use std::time::Instant;
 
 const TEMP_K: f64 = 298.15;
@@ -41,16 +39,16 @@ struct Synth {
     at: Array2<f64>,
     log_q: Array1<f64>,
     c0: Array1<f64>,
-    coffee_at: CArray2<f64>,
-    coffee_c0: CArray1<f64>,
-    coffee_q_nonexp: CArray1<f64>,
+    coffee_at: Array2<f64>,
+    coffee_c0: Array1<f64>,
+    coffee_q_nonexp: Array1<f64>,
 }
 
 fn build_synth(m: usize, n_cplx: usize, seed: u64) -> Synth {
     let n_species = m + n_cplx;
     let mut at = Array2::<f64>::zeros((n_species, m));
     let mut log_q = Array1::<f64>::zeros(n_species);
-    let mut coffee_q_nonexp = CArray1::<f64>::zeros(n_species);
+    let mut coffee_q_nonexp = Array1::<f64>::zeros(n_species);
 
     for i in 0..m {
         at[[i, i]] = 1.0;
@@ -83,9 +81,9 @@ fn build_synth(m: usize, n_cplx: usize, seed: u64) -> Synth {
         coffee_q_nonexp[row] = dg / RT;
     }
 
-    let coffee_at = CArray2::from_shape_vec((n_species, m), at.iter().copied().collect())
+    let coffee_at = Array2::from_shape_vec((n_species, m), at.iter().copied().collect())
         .expect("coffee_at shape");
-    let coffee_c0 = CArray1::from_vec(c0.to_vec());
+    let coffee_c0 = Array1::from_vec(c0.to_vec());
 
     Synth {
         at,

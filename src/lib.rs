@@ -534,6 +534,20 @@ fn apply_log_q_clamp(log_q: &mut Array1<f64>, clamp: Option<f64>) {
     }
 }
 
+fn stoichiometry_nonzeros(at: &Array2<f64>) -> Vec<Vec<(usize, f64)>> {
+    let mut rows = Vec::with_capacity(at.nrows());
+    for row in at.rows() {
+        let mut nz = Vec::new();
+        for (i, &v) in row.iter().enumerate() {
+            if v != 0.0 {
+                nz.push((i, v));
+            }
+        }
+        rows.push(nz);
+    }
+    rows
+}
+
 // ---------------------------------------------------------------------------
 // Internal data structures
 // ---------------------------------------------------------------------------
@@ -544,6 +558,10 @@ struct ProblemInputs {
     /// (= Aᵀ, stored row-major so that the dominant `Aᵀλ` multiply
     /// reads contiguous rows).
     at: Array2<f64>,
+    /// Sparse row view of `at`: for each species, the non-zero
+    /// `(monomer_index, stoichiometric_count)` entries. Used by Hessian
+    /// assembly to avoid scanning dense zero columns for sparse complexes.
+    at_nz: Vec<Vec<(usize, f64)>>,
     /// `n_species`. Zero for the monomer block, `-ΔG/(RT)` for complexes.
     log_q: Array1<f64>,
     /// `n_mon`. Total monomer concentrations.
@@ -579,6 +597,19 @@ struct WorkBuffers {
     grad: Array1<f64>,     // n_mon: gradient
     hessian: Array2<f64>,  // n_mon × n_mon: Hessian
     lambda_new: Array1<f64>, // n_mon: candidate iterate
+    step: Array1<f64>,     // n_mon: trust-region step
+    full_step: Array1<f64>, // n_mon: stagnation-recovery step
+    dogleg: DoglegBuffers,
+}
+
+#[derive(Debug, Clone)]
+struct DoglegBuffers {
+    chol_l: Array2<f64>, // n_mon × n_mon: Cholesky factor
+    chol_z: Array1<f64>, // n_mon: forward-substitution scratch
+    p_n: Array1<f64>,   // n_mon: Newton step
+    p_c: Array1<f64>,   // n_mon: Cauchy step
+    d: Array1<f64>,     // n_mon: p_n - p_c
+    hg: Array1<f64>,    // n_mon: H·g
 }
 
 impl WorkBuffers {
@@ -588,6 +619,16 @@ impl WorkBuffers {
             grad: Array1::zeros(n_mon),
             hessian: Array2::zeros((n_mon, n_mon)),
             lambda_new: Array1::zeros(n_mon),
+            step: Array1::zeros(n_mon),
+            full_step: Array1::zeros(n_mon),
+            dogleg: DoglegBuffers {
+                chol_l: Array2::zeros((n_mon, n_mon)),
+                chol_z: Array1::zeros(n_mon),
+                p_n: Array1::zeros(n_mon),
+                p_c: Array1::zeros(n_mon),
+                d: Array1::zeros(n_mon),
+                hg: Array1::zeros(n_mon),
+            },
         }
     }
 }
@@ -702,7 +743,12 @@ fn compile(b: &SystemBuilder) -> Result<CompiledSystem, EquilibriumError> {
     species_names.extend(complex_names);
 
     Ok(CompiledSystem {
-        inputs: ProblemInputs { at, log_q, c0 },
+        inputs: ProblemInputs {
+            at_nz: stoichiometry_nonzeros(&at),
+            at,
+            log_q,
+            c0,
+        },
         monomer_names,
         species_names,
     })
@@ -900,6 +946,7 @@ impl System {
         options.validate()?;
         apply_log_q_clamp(&mut log_q, options.log_q_clamp);
         let inputs = ProblemInputs {
+            at_nz: stoichiometry_nonzeros(&stoichiometry),
             at: stoichiometry,
             log_q,
             c0,
@@ -943,6 +990,7 @@ impl System {
         options.validate()?;
         apply_log_q_clamp(&mut log_q, options.log_q_clamp);
         let inputs = ProblemInputs {
+            at_nz: stoichiometry_nonzeros(&stoichiometry),
             at: stoichiometry,
             log_q,
             c0,
@@ -966,6 +1014,8 @@ impl System {
     /// solve), this returns the cached result with no recomputation.
     pub fn solve(&mut self) -> Result<Equilibrium<'_>, EquilibriumError> {
         if !self.fresh {
+            self.options.validate()?;
+            validate_inputs(&self.inputs)?;
             solve_inputs_into(
                 &self.inputs,
                 &mut self.work,
@@ -1040,12 +1090,20 @@ impl System {
     }
 
     /// Set a single `c0` entry and flip the freshness flag.
+    ///
+    /// The value is validated by [`System::solve`] before numerical work
+    /// begins. Call [`System::validate`] explicitly if you want to check
+    /// mutated inputs before solving.
     pub fn set_c0(&mut self, idx: usize, value: f64) {
         self.fresh = false;
         self.inputs.c0[idx] = value;
     }
 
     /// Set a single `log_q` entry and flip the freshness flag.
+    ///
+    /// The value is validated by [`System::solve`] before numerical work
+    /// begins. Call [`System::validate`] explicitly if you want to check
+    /// mutated inputs before solving.
     pub fn set_log_q(&mut self, idx: usize, value: f64) {
         self.fresh = false;
         self.inputs.log_q[idx] = value;
@@ -1252,6 +1310,7 @@ fn solve_inputs_into(
 
     let convergence = solve_dual_into(
         &inputs.at,
+        &inputs.at_nz,
         &inputs.log_q,
         &inputs.c0,
         &mut solution.lambda,
@@ -1323,12 +1382,33 @@ fn norm(v: &Array1<f64>) -> f64 {
     v.dot(v).sqrt()
 }
 
+fn quadratic_form(h: &Array2<f64>, p: &Array1<f64>) -> f64 {
+    let n = p.len();
+    let mut total = 0.0;
+    for i in 0..n {
+        let pi = p[i];
+        let mut row_dot = 0.0;
+        for j in 0..n {
+            row_dot += h[[i, j]] * p[j];
+        }
+        total += pi * row_dot;
+    }
+    total
+}
+
 /// Cholesky factorization of a symmetric positive-definite matrix.
-/// Returns the Newton step p = -H⁻¹g, or None if H is not positive definite.
-fn cholesky_solve(h: &Array2<f64>, g: &Array1<f64>) -> Option<Array1<f64>> {
+/// Writes the Newton step `p = -H⁻¹g`, returning `false` if `H` is not
+/// positive definite.
+fn cholesky_solve_into(
+    h: &Array2<f64>,
+    g: &Array1<f64>,
+    l: &mut Array2<f64>,
+    z: &mut Array1<f64>,
+    p: &mut Array1<f64>,
+) -> bool {
     let n = g.len();
     // Compute L (lower triangular, H = LLᵀ)
-    let mut l = Array2::zeros((n, n));
+    l.fill(0.0);
     for i in 0..n {
         for j in 0..=i {
             let mut sum = h[[i, j]];
@@ -1337,7 +1417,7 @@ fn cholesky_solve(h: &Array2<f64>, g: &Array1<f64>) -> Option<Array1<f64>> {
             }
             if i == j {
                 if sum <= 0.0 {
-                    return None;
+                    return false;
                 }
                 l[[i, j]] = sum.sqrt();
             } else {
@@ -1346,7 +1426,6 @@ fn cholesky_solve(h: &Array2<f64>, g: &Array1<f64>) -> Option<Array1<f64>> {
         }
     }
     // Forward solve: Lz = -g
-    let mut z = Array1::zeros(n);
     for i in 0..n {
         let mut sum = -g[i];
         for k in 0..i {
@@ -1355,7 +1434,6 @@ fn cholesky_solve(h: &Array2<f64>, g: &Array1<f64>) -> Option<Array1<f64>> {
         z[i] = sum / l[[i, i]];
     }
     // Back solve: Lᵀp = z
-    let mut p = Array1::zeros(n);
     for i in (0..n).rev() {
         let mut sum = z[i];
         for k in (i + 1)..n {
@@ -1363,7 +1441,7 @@ fn cholesky_solve(h: &Array2<f64>, g: &Array1<f64>) -> Option<Array1<f64>> {
         }
         p[i] = sum / l[[i, i]];
     }
-    Some(p)
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -1377,6 +1455,7 @@ fn cholesky_solve(h: &Array2<f64>, g: &Array1<f64>) -> Option<Array1<f64>> {
 /// reads contiguous rows).
 fn evaluate_into(
     at: &Array2<f64>,
+    at_nz: &[Vec<(usize, f64)>],
     log_q: &Array1<f64>,
     c0: &Array1<f64>,
     lambda: &Array1<f64>,
@@ -1385,9 +1464,6 @@ fn evaluate_into(
     hessian: &mut Array2<f64>,
     log_c_clamp: f64,
 ) -> f64 {
-    let n_species = at.nrows();
-    let n_mon = at.ncols();
-
     // c = exp(min(log_q + Aᵀλ, log_c_clamp))
     ndarray::linalg::general_mat_vec_mul(1.0, at, lambda, 0.0, c);
     *c += log_q;
@@ -1402,18 +1478,10 @@ fn evaluate_into(
 
     // H = A diag(c) Aᵀ (sparse loop)
     hessian.fill(0.0);
-    for k in 0..n_species {
+    for (k, row) in at_nz.iter().enumerate() {
         let ck = c[k];
-        for i in 0..n_mon {
-            let aik = at[[k, i]];
-            if aik == 0.0 {
-                continue;
-            }
-            for j in i..n_mon {
-                let ajk = at[[k, j]];
-                if ajk == 0.0 {
-                    continue;
-                }
+        for (a_pos, &(i, aik)) in row.iter().enumerate() {
+            for &(j, ajk) in &row[a_pos..] {
                 let val = aik * ck * ajk;
                 hessian[[i, j]] += val;
                 if i != j {
@@ -1442,51 +1510,92 @@ fn evaluate_objective_into(
     -lambda.dot(c0) + c_sum
 }
 
-/// Compute the dog-leg step within a trust region of radius `delta`.
-fn dogleg_step(grad: &Array1<f64>, hessian: &Array2<f64>, delta: f64) -> Array1<f64> {
-    let p_n = match cholesky_solve(hessian, grad) {
-        Some(p) => p,
-        None => {
-            // Defensive: H = A diag(c) Aᵀ with all c > 0, so H is always
-            // positive-definite and Cholesky cannot fail in practice.
-            let g_norm = norm(grad);
-            if g_norm == 0.0 {
-                return Array1::zeros(grad.len());
-            }
-            return -(delta / g_norm) * grad;
+/// Compute the dog-leg step within a trust region of radius `delta`, writing
+/// into `out` and returning `||out||`.
+fn dogleg_step_into(
+    grad: &Array1<f64>,
+    hessian: &Array2<f64>,
+    delta: f64,
+    out: &mut Array1<f64>,
+    buffers: &mut DoglegBuffers,
+) -> f64 {
+    if !cholesky_solve_into(
+        hessian,
+        grad,
+        &mut buffers.chol_l,
+        &mut buffers.chol_z,
+        &mut buffers.p_n,
+    ) {
+        // Defensive: H = A diag(c) Aᵀ with all c > 0, so H is always
+        // positive-definite and Cholesky cannot fail in practice.
+        let g_norm = norm(grad);
+        if g_norm == 0.0 {
+            out.fill(0.0);
+            return 0.0;
         }
-    };
+        out.assign(grad);
+        out.mapv_inplace(|v| -(delta / g_norm) * v);
+        return delta;
+    }
 
-    let p_n_norm = norm(&p_n);
+    let p_n_norm = norm(&buffers.p_n);
 
     if p_n_norm <= delta {
-        return p_n;
+        out.assign(&buffers.p_n);
+        return p_n_norm;
     }
 
     let gtg = grad.dot(grad);
-    let hg = hessian.dot(grad);
-    let gthg = grad.dot(&hg);
+    ndarray::linalg::general_mat_vec_mul(1.0, hessian, grad, 0.0, &mut buffers.hg);
+    let gthg = grad.dot(&buffers.hg);
 
     if gthg < 1e-30 * gtg {
         let g_norm = norm(grad);
-        return -(delta / g_norm) * grad;
+        out.assign(grad);
+        out.mapv_inplace(|v| -(delta / g_norm) * v);
+        return delta;
     }
 
-    let p_c = -(gtg / gthg) * grad;
-    let p_c_norm = norm(&p_c);
+    buffers.p_c.assign(grad);
+    buffers.p_c.mapv_inplace(|v| -(gtg / gthg) * v);
+    let p_c_norm = norm(&buffers.p_c);
 
     if p_c_norm >= delta {
-        return (delta / p_c_norm) * &p_c;
+        out.assign(&buffers.p_c);
+        out.mapv_inplace(|v| (delta / p_c_norm) * v);
+        return delta;
     }
 
-    let d = &p_n - &p_c;
-    let dd = d.dot(&d);
-    let pd = p_c.dot(&d);
-    let pp = p_c.dot(&p_c);
+    buffers.d.assign(&buffers.p_n);
+    buffers.d -= &buffers.p_c;
+    let dd = buffers.d.dot(&buffers.d);
+    let pd = buffers.p_c.dot(&buffers.d);
+    let pp = buffers.p_c.dot(&buffers.p_c);
     let discriminant = (pd * pd - dd * (pp - delta * delta)).max(0.0);
     let tau = ((-pd + discriminant.sqrt()) / dd).clamp(0.0, 1.0);
 
-    &p_c + tau * &d
+    out.assign(&buffers.p_c);
+    for (o, &d) in out.iter_mut().zip(buffers.d.iter()) {
+        *o += tau * d;
+    }
+    norm(out)
+}
+
+/// Convenience wrapper for tests.
+#[cfg(test)]
+fn dogleg_step(grad: &Array1<f64>, hessian: &Array2<f64>, delta: f64) -> Array1<f64> {
+    let n = grad.len();
+    let mut out = Array1::zeros(n);
+    let mut buffers = DoglegBuffers {
+        chol_l: Array2::zeros((n, n)),
+        chol_z: Array1::zeros(n),
+        p_n: Array1::zeros(n),
+        p_c: Array1::zeros(n),
+        d: Array1::zeros(n),
+        hg: Array1::zeros(n),
+    };
+    dogleg_step_into(grad, hessian, delta, &mut out, &mut buffers);
+    out
 }
 
 /// Convergence quality returned by the dual solver.
@@ -1507,6 +1616,7 @@ enum SolverConvergence {
 /// `work.c`.
 fn solve_dual_into(
     at: &Array2<f64>,
+    at_nz: &[Vec<(usize, f64)>],
     log_q: &Array1<f64>,
     c0: &Array1<f64>,
     lambda: &mut Array1<f64>,
@@ -1534,6 +1644,9 @@ fn solve_dual_into(
         grad,
         hessian,
         lambda_new,
+        step,
+        full_step,
+        dogleg,
     } = work;
 
     let mut delta = opts.initial_trust_region_radius;
@@ -1546,7 +1659,7 @@ fn solve_dual_into(
     }
 
     for iter in 0..max_iter {
-        let f = evaluate_into(at, log_q, c0, lambda, c, grad, hessian, log_c_clamp);
+        let f = evaluate_into(at, at_nz, log_q, c0, lambda, c, grad, hessian, log_c_clamp);
 
         if trace {
             let g_inf = grad.iter().map(|g: &f64| g.abs()).fold(0.0_f64, f64::max);
@@ -1563,15 +1676,15 @@ fn solve_dual_into(
             });
         }
 
-        let p = dogleg_step(grad, hessian, delta);
-        let p_norm = norm(&p);
+        let p_norm = dogleg_step_into(grad, hessian, delta, step, dogleg);
 
         lambda_new.assign(lambda);
-        *lambda_new += &p;
+        *lambda_new += &*step;
         let f_new = evaluate_objective_into(at, log_q, c0, lambda_new, c, log_c_clamp);
 
         let actual_reduction = f - f_new;
-        let predicted_reduction = -(grad.dot(&p) + 0.5 * p.dot(&hessian.dot(&p)));
+        let predicted_reduction =
+            -(grad.dot(&*step) + 0.5 * quadratic_form(hessian, &*step));
 
         if actual_reduction < 4.0 * f64::EPSILON * f.abs().max(1.0) {
             stagnation += 1;
@@ -1580,11 +1693,11 @@ fn solve_dual_into(
         }
 
         if stagnation >= stag_threshold {
-            let p_full = dogleg_step(grad, hessian, delta_max);
+            dogleg_step_into(grad, hessian, delta_max, full_step, dogleg);
             lambda_new.assign(lambda);
-            *lambda_new += &p_full;
+            *lambda_new += &*full_step;
             let f_full =
-                evaluate_into(at, log_q, c0, lambda_new, c, grad, hessian, log_c_clamp);
+                evaluate_into(at, at_nz, log_q, c0, lambda_new, c, grad, hessian, log_c_clamp);
             if f_full <= f {
                 std::mem::swap(lambda, lambda_new);
 
@@ -1608,13 +1721,13 @@ fn solve_dual_into(
                     });
                 }
 
-                delta = norm(&p_full);
+                delta = norm(full_step);
                 stagnation = 0;
                 continue;
             }
             // Recovery failed: re-evaluate at (unchanged) lambda so that
             // grad/c buffers match.
-            evaluate_into(at, log_q, c0, lambda, c, grad, hessian, log_c_clamp);
+            evaluate_into(at, at_nz, log_q, c0, lambda, c, grad, hessian, log_c_clamp);
             if grad
                 .iter()
                 .zip(c0.iter())
@@ -1648,7 +1761,7 @@ fn solve_dual_into(
         }
     }
 
-    evaluate_into(at, log_q, c0, lambda, c, grad, hessian, log_c_clamp);
+    evaluate_into(at, at_nz, log_q, c0, lambda, c, grad, hessian, log_c_clamp);
     Err(EquilibriumError::ConvergenceFailure {
         iterations: max_iter,
         gradient_norm: norm(grad),
@@ -2372,6 +2485,30 @@ mod tests {
         assert!(sys.validate().is_ok());
         sys.c0_mut()[0] = -1.0; // break the invariant
         assert!(sys.validate().is_err());
+    }
+
+    #[test]
+    fn solve_rejects_invalid_mutated_c0() {
+        let mut sys = simple_builder().build().unwrap();
+        sys.set_c0(0, 0.0);
+        let err = sys.solve().unwrap_err();
+        assert!(matches!(err, EquilibriumError::InvalidConcentration(0.0)));
+    }
+
+    #[test]
+    fn solve_rejects_invalid_mutated_log_q() {
+        let mut sys = simple_builder().build().unwrap();
+        sys.set_log_q(0, 1.0);
+        let err = sys.solve().unwrap_err();
+        assert!(matches!(err, EquilibriumError::InvalidInputs(_)));
+    }
+
+    #[test]
+    fn solve_rejects_invalid_mutated_options() {
+        let mut sys = simple_builder().build().unwrap();
+        sys.options_mut().max_iterations = 0;
+        let err = sys.solve().unwrap_err();
+        assert!(matches!(err, EquilibriumError::InvalidOptions(_)));
     }
 
     #[test]

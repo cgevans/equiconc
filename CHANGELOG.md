@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- New optional binary `equiconc-coffee-cli` (gated behind the `coffee-cli`
+  Cargo feature) that accepts the same NUPACK-style `.ocx`/`.cfe` +
+  `.con` input files as COFFEE's `coffee_cli` and produces the same
+  space-separated 2-decimal-scientific results payload. Hard-codes
+  `T = 37 °C`, mole-fraction scaling, and the `ΔG ≥ -230 kcal/mol`
+  clamp to match COFFEE's non-configurable defaults — producing
+  byte-for-byte agreement with `coffee_cli` on the monomer free
+  concentrations of `../coffee/testcases/{0,1,2}` at the `{:.2e}`
+  output precision, and on the full 8-species payload of testcase 2.
+  Integration tests in `tests/coffee_cli_compat.rs` verify per-species
+  agreement on a synthetic 2-monomer/1-dimer system and on all three
+  COFFEE testcases (skipped if `../coffee/testcases/` is absent).
+  Build with `cargo build --release --features coffee-cli`.
+
 ### Changed
 
 - Reverted the crate `license` field from `"BSD-3-Clause AND Apache-2.0"` back
@@ -20,6 +36,7 @@
   supplies the array types COFFEE's API requires.
 - `instrument_large` / `instrument_xl` no longer report a COFFEE iteration
   count (upstream's `Optimizer` doesn't expose one); wall time only.
+- Bumped `criterion` dev-dependency from 0.5 to 0.8.
 
 ## [0.2.0] - 2026-04-18
 
