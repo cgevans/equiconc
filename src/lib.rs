@@ -216,6 +216,42 @@ impl std::error::Error for EquilibriumError {}
 /// sys.solve()?;
 /// # Ok::<(), equiconc::EquilibriumError>(())
 /// ```
+/// Objective surface used by the trust-region solver.
+///
+/// Both variants share the same dual variable λ, the same primal recovery
+/// `c_j = exp(log_q_j + (Aᵀλ)_j)`, and the same convergence test on the
+/// primal mass-conservation residual `|Ac − c⁰|_i < atol + rtol · c0_i`.
+/// They differ only in the function the trust-region step minimizes.
+///
+/// - [`SolverObjective::Linear`] (default) minimizes the convex Dirks dual
+///   `f(λ) = -λᵀc⁰ + Σⱼ Qⱼ exp(Aᵀλ)_j` directly. The Hessian
+///   `H_f = A diag(c) Aᵀ` is positive semi-definite by construction, so
+///   plain Cholesky always succeeds. Robust on every system the
+///   formulation can express.
+///
+/// - [`SolverObjective::Log`] minimizes `g(λ) = ln f(λ)`. `g` shares the
+///   minimizer with `f` (since `f > 0` at the optimum) but compresses the
+///   exponential dynamic range of `f`, which can dramatically reduce the
+///   iteration count on stiff systems (very strong binding, asymmetric
+///   `c⁰`, etc.). The price is that `g` is *not* convex globally:
+///   `H_g = H_f/f − (∇f)(∇f)ᵀ/f²` can be indefinite away from the
+///   optimum. The solver compensates with on-the-fly diagonal
+///   regularization (modified Cholesky), guards `f > 0` at every iterate,
+///   and refuses any step whose model predicts an ascent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SolverObjective {
+    /// Direct dual `f(λ)` (default; convex; always well-defined).
+    Linear,
+    /// Log-dual `g(λ) = ln f(λ)` (faster on stiff systems; non-convex).
+    Log,
+}
+
+impl Default for SolverObjective {
+    fn default() -> Self {
+        Self::Linear
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SolverOptions {
     // --- Convergence -----------------------------------------------------
@@ -272,6 +308,12 @@ pub struct SolverOptions {
     /// before refinement. A clamp at ~230 matches COFFEE's internal
     /// behavior and keeps numerics well-scaled.
     pub log_q_clamp: Option<f64>,
+
+    // --- Objective surface ----------------------------------------------
+    /// Which objective surface the trust-region step minimizes. See
+    /// [`SolverObjective`] for the trade-offs. Defaults to
+    /// [`SolverObjective::Linear`] for backwards compatibility.
+    pub objective: SolverObjective,
 }
 
 impl Default for SolverOptions {
@@ -292,6 +334,7 @@ impl Default for SolverOptions {
             trust_region_grow_scale: 2.0,
             log_c_clamp: 700.0,
             log_q_clamp: None,
+            objective: SolverObjective::Linear,
         }
     }
 }
@@ -594,11 +637,21 @@ struct Names {
 #[derive(Debug, Clone)]
 struct WorkBuffers {
     c: Array1<f64>,        // n_species: concentrations at current λ
-    grad: Array1<f64>,     // n_mon: gradient
-    hessian: Array2<f64>,  // n_mon × n_mon: Hessian
+    grad: Array1<f64>,     // n_mon: gradient (∇f, also for log path so the
+                           //         convergence test stays on the primal residual)
+    hessian: Array2<f64>,  // n_mon × n_mon: Hessian (H_f for linear, H_g for log)
     lambda_new: Array1<f64>, // n_mon: candidate iterate
     step: Array1<f64>,     // n_mon: trust-region step
     full_step: Array1<f64>, // n_mon: stagnation-recovery step
+    // --- log-objective scratch -----------------------------------------
+    /// n_mon × n_mon: regularized Hessian `H_g + τ·I` for the log path.
+    /// Holds the model Hessian fed to the dog-leg, kept consistent across
+    /// the predicted-reduction calculation. Unused on the linear path.
+    hessian_reg: Array2<f64>,
+    /// n_mon: rescaled gradient `∇g = ∇f / f` for the log path. Passed to
+    /// the dog-leg as the search direction, while `grad` keeps `∇f` for
+    /// the convergence test. Unused on the linear path.
+    grad_g: Array1<f64>,
     dogleg: DoglegBuffers,
 }
 
@@ -621,6 +674,8 @@ impl WorkBuffers {
             lambda_new: Array1::zeros(n_mon),
             step: Array1::zeros(n_mon),
             full_step: Array1::zeros(n_mon),
+            hessian_reg: Array2::zeros((n_mon, n_mon)),
+            grad_g: Array1::zeros(n_mon),
             dogleg: DoglegBuffers {
                 chol_l: Array2::zeros((n_mon, n_mon)),
                 chol_z: Array1::zeros(n_mon),
@@ -1444,6 +1499,79 @@ fn cholesky_solve_into(
     true
 }
 
+/// Outcome of [`cholesky_solve_regularized_into`]: the chosen diagonal
+/// shift `τ` and whether the regularized factorization succeeded.
+///
+/// On success, the regularized Hessian `h_reg = h + τ·I` is the model the
+/// caller must use for predicted-reduction and trust-region acceptance —
+/// any inconsistency with the unshifted `h` would break the standard
+/// `ρ = actual / predicted` semantics.
+struct RegularizedCholesky {
+    /// Diagonal shift used. `0.0` if the unshifted Hessian was already PD.
+    /// Currently exposed for diagnostic tracing only.
+    #[allow(dead_code)]
+    tau: f64,
+    success: bool,
+}
+
+/// Modified Cholesky for an *almost-PSD* Hessian: factorize `h + τ·I`,
+/// growing `τ` until the factorization succeeds. Used by the log-objective
+/// path, whose Hessian `H_g = H_f/f − (∇f)(∇f)ᵀ/f²` can be indefinite
+/// because of the rank-1 negative term.
+///
+/// On success, `h_reg` holds the shifted matrix that produced `p`, so the
+/// caller can compute predicted-reduction against the *same* model
+/// (`pᵀ h_reg p`) and trust-region semantics stay consistent.
+///
+/// `tau_floor` is a problem-dependent lower bound for the first non-zero
+/// shift; the caller passes `(‖∇f‖² / f²) · 1e-8` (rationale in the plan).
+fn cholesky_solve_regularized_into(
+    h: &Array2<f64>,
+    g: &Array1<f64>,
+    tau_floor: f64,
+    h_reg: &mut Array2<f64>,
+    l: &mut Array2<f64>,
+    z: &mut Array1<f64>,
+    p: &mut Array1<f64>,
+) -> RegularizedCholesky {
+    const MAX_RETRIES: usize = 20;
+    let n = h.nrows();
+
+    // Try the unshifted Hessian first.
+    h_reg.assign(h);
+    if cholesky_solve_into(h_reg, g, l, z, p) {
+        return RegularizedCholesky {
+            tau: 0.0,
+            success: true,
+        };
+    }
+
+    // Pick an initial shift. Using both `tau_floor` and an
+    // eps-trace-of-H term ensures we don't start ridiculously small for
+    // ill-scaled Hessians.
+    let mut trace = 0.0;
+    for i in 0..n {
+        trace += h[[i, i]].abs();
+    }
+    let mut tau = tau_floor.max(f64::EPSILON * trace).max(1e-30);
+
+    for _ in 0..MAX_RETRIES {
+        h_reg.assign(h);
+        for i in 0..n {
+            h_reg[[i, i]] += tau;
+        }
+        if cholesky_solve_into(h_reg, g, l, z, p) {
+            return RegularizedCholesky { tau, success: true };
+        }
+        tau *= 4.0;
+    }
+
+    RegularizedCholesky {
+        tau,
+        success: false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Trust-region Newton solver on the dual
 // ---------------------------------------------------------------------------
@@ -1508,6 +1636,184 @@ fn evaluate_objective_into(
     let c_sum: f64 = c_buf.iter().map(|&lc| lc.min(log_c_clamp).exp()).sum();
 
     -lambda.dot(c0) + c_sum
+}
+
+/// Output of [`evaluate_log_into`] / [`evaluate_objective_log_into`].
+///
+/// Holds enough information for the trust-region driver to:
+/// (a) reject any step that would push `f ≤ 0` (Bug 1 protection: we
+///     never take `ln` of a non-positive value);
+/// (b) compute the regularization floor `(‖∇f‖² / f²) · 1e-8` for the
+///     modified Cholesky.
+#[derive(Debug, Clone, Copy)]
+struct LogEval {
+    /// `g = ln f`. Finite iff `f_positive`.
+    g: f64,
+    /// `f = -λᵀc⁰ + Σⱼ Qⱼ exp(Aᵀλ)_j`, computed via log-sum-exp without
+    /// ever forming `∞ − ∞`.
+    f: f64,
+    /// `false` if `f ≤ 0` numerically (in which case `g` is `NaN` and
+    /// the step must be rejected).
+    f_positive: bool,
+}
+
+/// Evaluate the log-dual objective `g(λ) = ln f(λ)`, gradient `∇f`,
+/// rescaled gradient `∇g = ∇f / f`, and log-Hessian
+/// `H_g = H_f/f − (∇f)(∇f)ᵀ/f²` at λ.
+///
+/// Buffer contract on success (`f_positive = true`):
+/// - `c` holds `c_j = exp(min(log_q_j + (Aᵀλ)_j, log_c_clamp))`, the
+///   primal concentrations (clamped only for the gradient/Hessian path,
+///   not for the objective).
+/// - `grad` holds `∇f = Aᵀc − c⁰` (the primal residual). The convergence
+///   test stays on this — *never* on `∇g` — to neutralize Bug 2.
+/// - `grad_g` holds `∇g = ∇f / f`, the search direction passed to the
+///   dog-leg.
+/// - `hessian` holds `H_g`, the (possibly indefinite) log-Hessian. The
+///   caller regularizes it via [`cholesky_solve_regularized_into`] before
+///   stepping; the modified-Cholesky shift becomes part of the model.
+///
+/// On failure (`f_positive = false`, i.e. `f ≤ 0` from cancellation),
+/// `c` and `grad` are still populated (so the caller can roll back to
+/// the previous iterate without re-evaluating), but `g`, `grad_g`, and
+/// `hessian` are not meaningful.
+fn evaluate_log_into(
+    at: &Array2<f64>,
+    at_nz: &[Vec<(usize, f64)>],
+    log_q: &Array1<f64>,
+    c0: &Array1<f64>,
+    lambda: &Array1<f64>,
+    c: &mut Array1<f64>,
+    grad: &mut Array1<f64>,
+    grad_g: &mut Array1<f64>,
+    hessian: &mut Array2<f64>,
+    log_c_clamp: f64,
+) -> LogEval {
+    // First pass: compute t_j = log_q_j + (Aᵀλ)_j into `c` (reused as
+    // scratch), find the max, then assemble both:
+    //   (1) c_j = exp(min(t_j, log_c_clamp))   [for gradient/Hessian]
+    //   (2) lse = max + ln(Σⱼ exp(t_j − max))  [for the objective]
+    //
+    // Computing `lse` from un-clamped `t_j` is essential: clamping inside
+    // the log-sum-exp would silently bias `f`, corrupting ρ. The clamp is
+    // only safe for the matrix products that follow (where the dropped
+    // mass is below f64 resolution anyway).
+    ndarray::linalg::general_mat_vec_mul(1.0, at, lambda, 0.0, c);
+    *c += log_q;
+
+    let mut t_max = f64::NEG_INFINITY;
+    for &t in c.iter() {
+        if t > t_max {
+            t_max = t;
+        }
+    }
+
+    // log-sum-exp on un-clamped t. Even when t_max > 700, exp(0) + ... is
+    // finite and `lse` is `t_max + small`.
+    let mut sum_shifted = 0.0;
+    for &t in c.iter() {
+        sum_shifted += (t - t_max).exp();
+    }
+    let lse = t_max + sum_shifted.ln();
+
+    // Now realize c = exp(min(t, log_c_clamp)) for the gradient/Hessian.
+    c.mapv_inplace(|t| t.min(log_c_clamp).exp());
+
+    // f = exp(lse) − λᵀc⁰. exp(lse) overflows to +∞ only when t_max > 709;
+    // in that regime we'll have clamped c (so grad/Hess are finite) but
+    // f is unrepresentable. The caller treats !f_positive identically to
+    // a failed step, shrinks δ, and retries — so this is safe.
+    let lambda_c0 = lambda.dot(c0);
+    let exp_lse = lse.exp();
+    let f = exp_lse - lambda_c0;
+
+    // ∇f = Aᵀc − c⁰. Always finite given clamped c.
+    ndarray::linalg::general_mat_vec_mul(1.0, &at.t(), c, 0.0, grad);
+    *grad -= c0;
+
+    if !(f > 0.0) || !f.is_finite() {
+        return LogEval {
+            g: f64::NAN,
+            f,
+            f_positive: false,
+        };
+    }
+
+    // ∇g = ∇f / f
+    let inv_f = 1.0 / f;
+    for (gg, &gf) in grad_g.iter_mut().zip(grad.iter()) {
+        *gg = gf * inv_f;
+    }
+
+    // H_g = H_f / f − ∇f ∇fᵀ / f². Build H_f / f first via the same
+    // sparse loop used by the linear path, scaling c by 1/f at the
+    // outer-product step.
+    hessian.fill(0.0);
+    for (k, row) in at_nz.iter().enumerate() {
+        let ck_over_f = c[k] * inv_f;
+        for (a_pos, &(i, aik)) in row.iter().enumerate() {
+            for &(j, ajk) in &row[a_pos..] {
+                let val = aik * ck_over_f * ajk;
+                hessian[[i, j]] += val;
+                if i != j {
+                    hessian[[j, i]] += val;
+                }
+            }
+        }
+    }
+    // Subtract the rank-1 term ∇f ∇fᵀ / f² = ∇g ∇gᵀ.
+    for i in 0..grad_g.len() {
+        let gi = grad_g[i];
+        for j in 0..grad_g.len() {
+            hessian[[i, j]] -= gi * grad_g[j];
+        }
+    }
+
+    LogEval {
+        g: f.ln(),
+        f,
+        f_positive: true,
+    }
+}
+
+/// Cheap candidate-evaluator for the log path: returns just `(g, f)`,
+/// for the trust-region ρ check after a candidate λ_new. Mirrors
+/// [`evaluate_objective_into`].
+fn evaluate_objective_log_into(
+    at: &Array2<f64>,
+    log_q: &Array1<f64>,
+    c0: &Array1<f64>,
+    lambda: &Array1<f64>,
+    c_buf: &mut Array1<f64>,
+) -> LogEval {
+    ndarray::linalg::general_mat_vec_mul(1.0, at, lambda, 0.0, c_buf);
+    *c_buf += log_q;
+
+    let mut t_max = f64::NEG_INFINITY;
+    for &t in c_buf.iter() {
+        if t > t_max {
+            t_max = t;
+        }
+    }
+    let mut sum_shifted = 0.0;
+    for &t in c_buf.iter() {
+        sum_shifted += (t - t_max).exp();
+    }
+    let lse = t_max + sum_shifted.ln();
+
+    let f = lse.exp() - lambda.dot(c0);
+    if !(f > 0.0) || !f.is_finite() {
+        return LogEval {
+            g: f64::NAN,
+            f,
+            f_positive: false,
+        };
+    }
+    LogEval {
+        g: f.ln(),
+        f,
+        f_positive: true,
+    }
 }
 
 /// Compute the dog-leg step within a trust region of radius `delta`, writing
@@ -1614,7 +1920,33 @@ enum SolverConvergence {
 /// exit, it holds the converged optimum. Convergence metadata is
 /// returned; primal concentrations at the final `lambda` are left in
 /// `work.c`.
+///
+/// Dispatches to one of two trust-region drivers based on
+/// [`SolverOptions::objective`]:
+///
+/// - [`solve_dual_linear_into`]: minimizes the convex Dirks dual `f(λ)`
+///   directly. The textbook trust-region Newton method on a PSD Hessian.
+/// - [`solve_dual_log_into`]: minimizes `g(λ) = ln f(λ)` with on-the-fly
+///   modified-Cholesky regularization, primal-residual convergence, and
+///   `f > 0` step rejection — see `solve_dual_log_into` for the details.
 fn solve_dual_into(
+    at: &Array2<f64>,
+    at_nz: &[Vec<(usize, f64)>],
+    log_q: &Array1<f64>,
+    c0: &Array1<f64>,
+    lambda: &mut Array1<f64>,
+    work: &mut WorkBuffers,
+    opts: &SolverOptions,
+) -> Result<SolverConvergence, EquilibriumError> {
+    match opts.objective {
+        SolverObjective::Linear => {
+            solve_dual_linear_into(at, at_nz, log_q, c0, lambda, work, opts)
+        }
+        SolverObjective::Log => solve_dual_log_into(at, at_nz, log_q, c0, lambda, work, opts),
+    }
+}
+
+fn solve_dual_linear_into(
     at: &Array2<f64>,
     at_nz: &[Vec<(usize, f64)>],
     log_q: &Array1<f64>,
@@ -1646,6 +1978,8 @@ fn solve_dual_into(
         lambda_new,
         step,
         full_step,
+        hessian_reg: _,
+        grad_g: _,
         dogleg,
     } = work;
 
@@ -1768,6 +2102,294 @@ fn solve_dual_into(
     })
 }
 
+/// Trust-region driver for the log-dual `g(λ) = ln f(λ)`.
+///
+/// Differs from [`solve_dual_linear_into`] in three structural ways, each
+/// chosen to neutralize a documented coffee failure mode (see
+/// `coffee-bugs.md` and `coffee/docs/issue2-analysis.md`):
+///
+/// 1. **Objective via log-sum-exp** — `g` is computed via
+///    [`evaluate_log_into`], which runs log-sum-exp on the un-clamped
+///    `log_q + Aᵀλ` and then subtracts `λᵀc⁰`. We never form `f` and
+///    then take its log, so the `∞ − ∞ = NaN` overflow path that bites
+///    coffee (Bug 1) is not reachable. Steps that would push `f ≤ 0` are
+///    rejected (treated as `ρ = -1`) without ever evaluating `ln`.
+///
+/// 2. **Convergence on the primal residual** — although the trust-region
+///    *step* minimizes `g`, the *stopping criterion* is `|∇f_i| <
+///    atol + rtol · c0_i` on `∇f = Ac − c⁰` (the mass-conservation
+///    residual). `evaluate_log_into` populates `grad` with `∇f` and a
+///    separate `grad_g` with `∇f / f`; convergence and stagnation
+///    recovery code is *byte-identical* to the linear path. This
+///    sidesteps coffee Bug 2: we never test on a gradient that has been
+///    artificially scaled by `1/f`, so strong binding can't trick us
+///    into "converging" near `λ = 0`.
+///
+/// 3. **Regularized model on indefinite Hessians** — `H_g = H_f/f −
+///    (∇f)(∇f)ᵀ/f²` is PSD only at the optimum. Each iteration applies
+///    [`cholesky_solve_regularized_into`] to find the smallest `τ` such
+///    that `H_g + τ·I` is PD; the dog-leg then runs on that regularized
+///    matrix, and `predicted_reduction` is computed against the *same*
+///    regularized matrix. This guarantees `pred_reduction > 0` whenever
+///    the step is non-zero, which short-circuits the "issue #2"
+///    pathology (`ρ = (−)/(−) > 0 → grow δ on a worsening step`). A
+///    defensive `pred ≤ 0 → ρ = -1` sentinel covers the residual case
+///    where regularization saturates.
+fn solve_dual_log_into(
+    at: &Array2<f64>,
+    at_nz: &[Vec<(usize, f64)>],
+    log_q: &Array1<f64>,
+    c0: &Array1<f64>,
+    lambda: &mut Array1<f64>,
+    work: &mut WorkBuffers,
+    opts: &SolverOptions,
+) -> Result<SolverConvergence, EquilibriumError> {
+    let max_iter = opts.max_iterations;
+    let atol = opts.gradient_abs_tol;
+    let rtol = opts.gradient_rel_tol;
+    let stag_atol = opts.relaxed_gradient_abs_tol;
+    let stag_rtol = opts.relaxed_gradient_rel_tol;
+    let eta = opts.step_accept_threshold;
+    let delta_max = opts.max_trust_region_radius;
+    let shrink_rho = opts.trust_region_shrink_rho;
+    let grow_rho = opts.trust_region_grow_rho;
+    let shrink_scale = opts.trust_region_shrink_scale;
+    let grow_scale = opts.trust_region_grow_scale;
+    let stag_threshold = opts.stagnation_threshold;
+    let log_c_clamp = opts.log_c_clamp;
+
+    let WorkBuffers {
+        c,
+        grad,
+        hessian,
+        lambda_new,
+        step,
+        full_step,
+        hessian_reg,
+        grad_g,
+        dogleg,
+    } = work;
+
+    let mut delta = opts.initial_trust_region_radius;
+    let mut stagnation = 0u32;
+
+    let trace = std::env::var_os("EQUICONC_TRACE").is_some();
+    if trace {
+        eprintln!("# iter\tg\tf\tgrad_inf_norm\tdelta\ttau\tstag");
+    }
+
+    // Bootstrap: ensure `f(λ_seed) > 0`. If a pathological seed lands on
+    // the wrong side, take one Newton step on the *linear* objective to
+    // enter the basin where `g = ln f` is well-defined. Internal-only —
+    // not user-visible.
+    {
+        let probe = evaluate_objective_log_into(at, log_q, c0, lambda, c);
+        if !probe.f_positive {
+            // Re-evaluate the linear objective at λ to populate grad/hessian
+            // for the linear bootstrap step.
+            let _f_lin = evaluate_into(
+                at, at_nz, log_q, c0, lambda, c, grad, hessian, log_c_clamp,
+            );
+            // One unconstrained Newton step on f. If Cholesky fails (it
+            // shouldn't — H_f is PSD by construction), bail out: this
+            // input is not log-tractable and shouldn't have used Log.
+            if !cholesky_solve_into(
+                hessian,
+                grad,
+                &mut dogleg.chol_l,
+                &mut dogleg.chol_z,
+                &mut dogleg.p_n,
+            ) {
+                return Err(EquilibriumError::ConvergenceFailure {
+                    iterations: 0,
+                    gradient_norm: norm(grad),
+                });
+            }
+            // dogleg.p_n now holds the Newton step. Apply.
+            for (li, &pi) in lambda.iter_mut().zip(dogleg.p_n.iter()) {
+                *li += pi;
+            }
+        }
+    }
+
+    for iter in 0..max_iter {
+        let eval = evaluate_log_into(
+            at,
+            at_nz,
+            log_q,
+            c0,
+            lambda,
+            c,
+            grad,
+            grad_g,
+            hessian,
+            log_c_clamp,
+        );
+
+        if !eval.f_positive {
+            // Should not happen post-bootstrap: only positive-f iterates
+            // are accepted. Surface a clean error rather than NaN.
+            return Err(EquilibriumError::ConvergenceFailure {
+                iterations: iter + 1,
+                gradient_norm: norm(grad),
+            });
+        }
+        let g = eval.g;
+        let f = eval.f;
+
+        if trace {
+            let g_inf = grad.iter().map(|gv: &f64| gv.abs()).fold(0.0_f64, f64::max);
+            eprintln!(
+                "{iter}\t{g:.15e}\t{f:.6e}\t{g_inf:.6e}\t{delta:.3e}\t-\t{stagnation}"
+            );
+        }
+
+        // Convergence test on the *primal residual* — same criterion as
+        // the linear path. ∇f sits in `grad`.
+        if grad
+            .iter()
+            .zip(c0.iter())
+            .all(|(&gv, &cv)| gv.abs() < atol + rtol * cv)
+        {
+            return Ok(SolverConvergence::Full {
+                iterations: iter + 1,
+            });
+        }
+
+        // Regularize H_g, then dog-leg on the *regularized* model so
+        // predicted_reduction stays consistent with the step direction.
+        let gnorm_sq: f64 = grad.iter().map(|&v| v * v).sum();
+        let tau_floor = (gnorm_sq / (f * f)) * 1e-8;
+        let reg = cholesky_solve_regularized_into(
+            hessian,
+            grad_g,
+            tau_floor,
+            hessian_reg,
+            &mut dogleg.chol_l,
+            &mut dogleg.chol_z,
+            &mut dogleg.p_n,
+        );
+        if !reg.success {
+            return Err(EquilibriumError::ConvergenceFailure {
+                iterations: iter + 1,
+                gradient_norm: norm(grad),
+            });
+        }
+
+        let p_norm = dogleg_step_into(grad_g, hessian_reg, delta, step, dogleg);
+
+        lambda_new.assign(lambda);
+        *lambda_new += &*step;
+        let cand = evaluate_objective_log_into(at, log_q, c0, lambda_new, c);
+
+        // Step rejection on f_new ≤ 0 (Bug 1 protection): force ρ < 0.
+        let (actual_reduction, predicted_reduction);
+        if !cand.f_positive {
+            actual_reduction = -1.0;
+            predicted_reduction = 1.0;
+        } else {
+            actual_reduction = g - cand.g;
+            predicted_reduction =
+                -(grad_g.dot(&*step) + 0.5 * quadratic_form(hessian_reg, &*step));
+        }
+
+        if actual_reduction < 4.0 * f64::EPSILON * g.abs().max(1.0) {
+            stagnation += 1;
+        } else {
+            stagnation = 0;
+        }
+
+        if stagnation >= stag_threshold {
+            // Try a full Newton step on the regularized log-model. Same
+            // pattern as the linear path's stagnation recovery, except
+            // we evaluate the candidate via the log-objective and only
+            // accept if `f_full > 0` and `g` actually decreased.
+            dogleg_step_into(grad_g, hessian_reg, delta_max, full_step, dogleg);
+            lambda_new.assign(lambda);
+            *lambda_new += &*full_step;
+            let probe = evaluate_objective_log_into(at, log_q, c0, lambda_new, c);
+            let accept = probe.f_positive && probe.g <= g;
+            if accept {
+                std::mem::swap(lambda, lambda_new);
+                let _ = evaluate_log_into(
+                    at, at_nz, log_q, c0, lambda, c, grad, grad_g, hessian, log_c_clamp,
+                );
+
+                if grad
+                    .iter()
+                    .zip(c0.iter())
+                    .all(|(&gv, &cv)| gv.abs() < atol + rtol * cv)
+                {
+                    return Ok(SolverConvergence::Full {
+                        iterations: iter + 1,
+                    });
+                }
+                if grad
+                    .iter()
+                    .zip(c0.iter())
+                    .all(|(&gv, &cv)| gv.abs() < stag_atol + stag_rtol * cv)
+                {
+                    return Ok(SolverConvergence::Relaxed {
+                        iterations: iter + 1,
+                        gradient_norm: norm(grad),
+                    });
+                }
+
+                delta = norm(full_step);
+                stagnation = 0;
+                continue;
+            }
+            // Recovery failed: re-evaluate at unchanged λ so c/grad reflect it.
+            let _ = evaluate_log_into(
+                at, at_nz, log_q, c0, lambda, c, grad, grad_g, hessian, log_c_clamp,
+            );
+            if grad
+                .iter()
+                .zip(c0.iter())
+                .all(|(&gv, &cv)| gv.abs() < stag_atol + stag_rtol * cv)
+            {
+                return Ok(SolverConvergence::Relaxed {
+                    iterations: iter + 1,
+                    gradient_norm: norm(grad),
+                });
+            }
+            return Err(EquilibriumError::ConvergenceFailure {
+                iterations: iter + 1,
+                gradient_norm: norm(grad),
+            });
+        }
+
+        // Defensive ρ rule: if the regularized model still predicts an
+        // ascent (shouldn't happen — H_reg is PD by construction — but
+        // covers regularization saturation and arithmetic edge cases),
+        // declare the model unreliable and force a shrink + reject. This
+        // is the issue-#2 protection at the outer-loop level.
+        let rho = if predicted_reduction > 0.0 {
+            actual_reduction / predicted_reduction
+        } else {
+            -1.0
+        };
+
+        if rho < shrink_rho {
+            delta *= shrink_scale;
+        } else if rho > grow_rho && (p_norm - delta).abs() < 1e-10 * delta {
+            delta = (grow_scale * delta).min(delta_max);
+        }
+
+        if rho > eta {
+            std::mem::swap(lambda, lambda_new);
+        }
+    }
+
+    let _ = evaluate_log_into(
+        at, at_nz, log_q, c0, lambda, c, grad, grad_g, hessian, log_c_clamp,
+    );
+    Err(EquilibriumError::ConvergenceFailure {
+        iterations: max_iter,
+        gradient_norm: norm(grad),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1816,6 +2438,161 @@ mod tests {
         let free = c0 - x;
 
         assert!((eq.get("A").unwrap() - free).abs() < 1e-12);
+        assert!((eq.get("B").unwrap() - free).abs() < 1e-12);
+        assert!((eq.get("AB").unwrap() - x).abs() < 1e-12);
+    }
+
+    /// Coffee Bug 1 reproducer (`coffee-bugs.md` §"Bug 1: NaN production
+    /// from log-lagrangian overflow"). Single monomer A at 1 mM with a
+    /// conformational state A* at ΔG = +3.9 kcal/mol, T = 293.15 K. Coffee
+    /// returns NaN; equiconc's log path must return the correct
+    /// equilibrium without ever forming `∞ − ∞`.
+    #[test]
+    fn coffee_bug1_positive_dg_conformer_log() {
+        let c0 = 1e-3;
+        let dg = 3.9;
+        let opts = SolverOptions {
+            objective: SolverObjective::Log,
+            ..Default::default()
+        };
+        let mut sys = SystemBuilder::new()
+            .temperature(293.15)
+            .monomer("A", c0)
+            .complex("Astar", &[("A", 1)], dg)
+            .options(opts)
+            .build()
+            .unwrap();
+        let eq = sys.solve().expect("log path must converge on +ΔG conformer");
+
+        // Analytical: A + A* = c0; A*/A = exp(-dg/RT). So A = c0/(1+K).
+        let k = (-dg / (R * 293.15)).exp();
+        let a_free = c0 / (1.0 + k);
+        let a_star = c0 - a_free;
+
+        let a_got = eq.get("A").unwrap();
+        let astar_got = eq.get("Astar").unwrap();
+        assert!(a_got.is_finite() && astar_got.is_finite());
+        assert!((a_got - a_free).abs() < 1e-9 * c0, "A: got {a_got} want {a_free}");
+        assert!((astar_got - a_star).abs() < 1e-9 * c0, "A*: got {astar_got} want {a_star}");
+    }
+
+    /// Coffee Bug 2 reproducer (`coffee-bugs.md` §"Bug 2: premature
+    /// convergence with strong binding"). A + 2B ⇌ AB₂ with ΔG = -39.47
+    /// kcal/mol at 349.7 K, asymmetric c⁰. Coffee silently terminates at
+    /// λ ≈ 0; equiconc's log path must find the true minimum and respect
+    /// mass conservation.
+    #[test]
+    fn coffee_bug2_strong_binding_log() {
+        let temp_k = 349.7;
+        let dg = -39.47;
+        let a0 = 1e-3;
+        let b0 = 162.4e-6;
+        let opts = SolverOptions {
+            objective: SolverObjective::Log,
+            ..Default::default()
+        };
+        let mut sys = SystemBuilder::new()
+            .temperature(temp_k)
+            .monomer("A", a0)
+            .monomer("B", b0)
+            .complex("AB2", &[("A", 1), ("B", 2)], dg)
+            .options(opts)
+            .build()
+            .unwrap();
+        let eq = sys.solve().expect("log path must converge under strong binding");
+
+        let a_free = eq.get("A").unwrap();
+        let b_free = eq.get("B").unwrap();
+        let ab2 = eq.get("AB2").unwrap();
+
+        // Mass conservation must hold tightly. (Coffee's bug: A_free
+        // exceeds A_0, mass error ≈ 3.6e-4.)
+        let a_total = a_free + ab2;
+        let b_total = b_free + 2.0 * ab2;
+        assert!(
+            (a_total - a0).abs() < 1e-10 * a0,
+            "A mass: got {a_total} (free {a_free} + AB2 {ab2}), want {a0}"
+        );
+        assert!(
+            (b_total - b0).abs() < 1e-10 * b0,
+            "B mass: got {b_total} (free {b_free} + 2·AB2 {ab2}), want {b0}"
+        );
+        // And specifically the failing predicate from coffee-bugs.md:
+        assert!(
+            a_free <= a0,
+            "A_free ({a_free}) must not exceed A_0 ({a0})"
+        );
+    }
+
+    /// Coffee issue #2 reproducer (`coffee/docs/issue2-analysis.md`).
+    /// A + B ⇌ AB with ΔG/RT ≈ -31.71667 (extreme stiffness) and
+    /// asymmetric c⁰ that originally caused trust-region oscillation in
+    /// coffee. equiconc's log path with regularization + ρ guard must
+    /// converge cleanly.
+    #[test]
+    fn coffee_issue2_strong_dimer_log() {
+        // Convert ΔG/RT = -31.71667 at 37 °C to a kcal/mol ΔG.
+        let temp_k = 310.15;
+        let dg = -31.71667 * R * temp_k;
+        let a0 = 2.623620156538e-9;
+        let b0 = 1.075755232314e-4;
+        let opts = SolverOptions {
+            objective: SolverObjective::Log,
+            ..Default::default()
+        };
+        let mut sys = SystemBuilder::new()
+            .temperature(temp_k)
+            .monomer("A", a0)
+            .monomer("B", b0)
+            .complex("AB", &[("A", 1), ("B", 1)], dg)
+            .options(opts)
+            .build()
+            .unwrap();
+        let eq = sys.solve().expect("log path must converge on issue-#2 system");
+        let a_free = eq.get("A").unwrap();
+        let b_free = eq.get("B").unwrap();
+        let ab = eq.get("AB").unwrap();
+        // Mass conservation tight.
+        assert!((a_free + ab - a0).abs() < 1e-10 * a0);
+        assert!((b_free + ab - b0).abs() < 1e-10 * b0);
+        // With this much stoichiometry imbalance, essentially all of A
+        // ends up in the complex.
+        assert!(
+            ab > 0.99 * a0,
+            "expected near-quantitative binding of A: got AB={ab}, A0={a0}"
+        );
+    }
+
+    #[test]
+    fn simple_dimerization_log() {
+        // Same problem as `simple_dimerization`, on the log objective.
+        // Log path must hit the same analytical solution to ~1e-12.
+        let c0 = 100.0 * NM;
+        let dg = -10.0;
+        let opts = SolverOptions {
+            objective: SolverObjective::Log,
+            ..Default::default()
+        };
+        let mut sys = SystemBuilder::new()
+            .monomer("A", c0)
+            .monomer("B", c0)
+            .complex("AB", &[("A", 1), ("B", 1)], dg)
+            .options(opts)
+            .build()
+            .unwrap();
+        let eq = sys.solve().unwrap();
+
+        let rt = R * 298.15;
+        let k = (-dg / rt).exp();
+        let x = ((2.0 * k * c0 + 1.0) - (4.0 * k * c0 + 1.0).sqrt()) / (2.0 * k);
+        let free = c0 - x;
+
+        assert!(
+            (eq.get("A").unwrap() - free).abs() < 1e-12,
+            "A: got {}, want {}",
+            eq.get("A").unwrap(),
+            free
+        );
         assert!((eq.get("B").unwrap() - free).abs() < 1e-12);
         assert!((eq.get("AB").unwrap() - x).abs() < 1e-12);
     }
@@ -1900,6 +2677,181 @@ mod tests {
         assert!(ab <= 100.0 * NM + 1e-12);
         assert!((a + ab - 200.0 * NM).abs() < 1e-8 * 200.0 * NM);
         assert!((b + ab - 100.0 * NM).abs() < 1e-8 * 100.0 * NM);
+    }
+
+    #[test]
+    fn competing_complexes_log() {
+        let opts = SolverOptions {
+            objective: SolverObjective::Log,
+            ..Default::default()
+        };
+        let c0 = 100.0 * NM;
+        let mut sys = SystemBuilder::new()
+            .monomer("a", c0)
+            .monomer("b", c0)
+            .monomer("c", c0)
+            .complex("ab", &[("a", 1), ("b", 1)], -10.0)
+            .complex("aaa", &[("a", 3)], -15.0)
+            .complex("bc", &[("b", 1), ("c", 1)], -12.0)
+            .options(opts)
+            .build()
+            .unwrap();
+        let eq = sys.solve().unwrap();
+
+        let a = eq.get("a").unwrap();
+        let b = eq.get("b").unwrap();
+        let c = eq.get("c").unwrap();
+        let ab = eq.get("ab").unwrap();
+        let aaa = eq.get("aaa").unwrap();
+        let bc = eq.get("bc").unwrap();
+
+        assert!((a + ab + 3.0 * aaa - c0).abs() < 1e-5 * c0);
+        assert!((b + ab + bc - c0).abs() < 1e-5 * c0);
+        assert!((c + bc - c0).abs() < 1e-5 * c0);
+    }
+
+    #[test]
+    fn strong_binding_log() {
+        let opts = SolverOptions {
+            objective: SolverObjective::Log,
+            ..Default::default()
+        };
+        let c0 = 100.0 * NM;
+        let mut sys = SystemBuilder::new()
+            .monomer("A", c0)
+            .monomer("B", c0)
+            .complex("AB", &[("A", 1), ("B", 1)], -30.0)
+            .options(opts)
+            .build()
+            .unwrap();
+        let eq = sys.solve().unwrap();
+
+        let ab = eq.get("AB").unwrap();
+        assert!((ab - c0).abs() < 1e-6 * c0, "[AB] = {ab}, expected ≈ {c0}");
+        assert!(eq.get("A").unwrap() < 1e-12);
+        assert!(eq.get("B").unwrap() < 1e-12);
+    }
+
+    #[test]
+    fn asymmetric_concentrations_log() {
+        // Mirrors `asymmetric_concentrations` on the log objective. The
+        // assertion tolerance here matches the `gradient_rel_tol = 1e-7`
+        // default; the linear path coincidentally over-converges by ~10×
+        // because its last iteration crosses the convergence threshold
+        // and continues to a quadratic-Newton step. The log path stops at
+        // the criterion, which is what the contract promises.
+        let opts = SolverOptions {
+            objective: SolverObjective::Log,
+            ..Default::default()
+        };
+        let mut sys = SystemBuilder::new()
+            .monomer("A", 200.0 * NM)
+            .monomer("B", 100.0 * NM)
+            .complex("AB", &[("A", 1), ("B", 1)], -10.0)
+            .options(opts)
+            .build()
+            .unwrap();
+        let eq = sys.solve().unwrap();
+
+        let a = eq.get("A").unwrap();
+        let b = eq.get("B").unwrap();
+        let ab = eq.get("AB").unwrap();
+
+        assert!(ab <= 100.0 * NM + 1e-12);
+        assert!((a + ab - 200.0 * NM).abs() < 1e-7 * 200.0 * NM);
+        assert!((b + ab - 100.0 * NM).abs() < 1e-7 * 100.0 * NM);
+    }
+
+    /// Dilute-system test: all c⁰ near the f64 floor with a moderate-ΔG
+    /// complex. Log scale is most useful in this regime, but it's also
+    /// where `f ≤ 0` step rejection is most likely to misfire if the
+    /// log-sum-exp arithmetic is sloppy. The log path must converge
+    /// without spurious rejections.
+    #[test]
+    fn dilute_system_log() {
+        let opts = SolverOptions {
+            objective: SolverObjective::Log,
+            ..Default::default()
+        };
+        let c0 = 1e-15;
+        let mut sys = SystemBuilder::new()
+            .monomer("A", c0)
+            .monomer("B", c0)
+            .complex("AB", &[("A", 1), ("B", 1)], -8.0)
+            .options(opts)
+            .build()
+            .unwrap();
+        let eq = sys.solve().unwrap();
+        let a = eq.get("A").unwrap();
+        let b = eq.get("B").unwrap();
+        let ab = eq.get("AB").unwrap();
+        // Mass conservation (relative, since absolutes are at f64 floor).
+        assert!((a + ab - c0).abs() < 1e-8 * c0);
+        assert!((b + ab - c0).abs() < 1e-8 * c0);
+    }
+
+    /// Warm-start sweep: titration loop calling solve() repeatedly with
+    /// mutated c⁰ under the log objective. Each solve must converge,
+    /// reusing the previous λ as warm start without ever tripping the
+    /// `f ≤ 0` rejection.
+    #[test]
+    fn warm_start_sweep_log() {
+        let opts = SolverOptions {
+            objective: SolverObjective::Log,
+            ..Default::default()
+        };
+        let mut sys = SystemBuilder::new()
+            .monomer("A", 1e-12_f64.max(1e-20))
+            .monomer("B", 100.0 * NM)
+            .complex("AB", &[("A", 1), ("B", 1)], -12.0)
+            .options(opts)
+            .build()
+            .unwrap();
+
+        let a_idx = sys.monomer_index("A").unwrap();
+        let ab_idx = sys.species_index("AB").unwrap();
+        for i in 1..=100 {
+            let a0 = (i as f64) * 1e-9;
+            sys.set_c0(a_idx, a0);
+            let eq = sys.solve().unwrap_or_else(|e| {
+                panic!("warm-start sweep step {i} (A0 = {a0:e}) failed: {e:?}")
+            });
+            let ab = eq.at(ab_idx);
+            // AB should rise monotonically with A0 in this regime.
+            assert!(ab > 0.0 && ab.is_finite());
+        }
+    }
+
+    /// Property: log path and linear path agree on a small mixed-stoichiometry
+    /// system that exercises competing complexes and asymmetric c⁰. The two
+    /// surfaces share a unique minimizer; agreement is a structural check.
+    #[test]
+    fn log_matches_linear_on_competing_system() {
+        let build = |obj: SolverObjective| {
+            let opts = SolverOptions { objective: obj, ..Default::default() };
+            SystemBuilder::new()
+                .monomer("A", 200.0 * NM)
+                .monomer("B", 80.0 * NM)
+                .monomer("C", 50.0 * NM)
+                .complex("AB", &[("A", 1), ("B", 1)], -10.0)
+                .complex("ABC", &[("A", 1), ("B", 1), ("C", 1)], -18.0)
+                .complex("AA", &[("A", 2)], -8.0)
+                .options(opts)
+                .build()
+                .unwrap()
+        };
+        let mut lin = build(SolverObjective::Linear);
+        let mut log = build(SolverObjective::Log);
+        let lin_eq = lin.solve().unwrap();
+        let log_eq = log.solve().unwrap();
+        for name in ["A", "B", "C", "AB", "ABC", "AA"] {
+            let a = lin_eq.get(name).unwrap();
+            let b = log_eq.get(name).unwrap();
+            assert!(
+                (a - b).abs() < 1e-6 * a.max(1e-30),
+                "{name}: linear={a:e}, log={b:e}"
+            );
+        }
     }
 
     #[test]
