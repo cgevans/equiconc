@@ -85,7 +85,7 @@ jobs:
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v7
-      - uses: extractions/setup-just@v2
+      - uses: extractions/setup-just@v4
       - run: uv sync --group docs
       - run: just docs
       - name: Upload docs artifact
@@ -149,7 +149,7 @@ jobs:
           enable-cache: true
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov
-      - uses: extractions/setup-just@v2
+      - uses: extractions/setup-just@v4
 
       - run: uv sync --dev --no-install-project # special version will be installed by coverage-lcov
       - run: just coverage-python-full
