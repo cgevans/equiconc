@@ -1,0 +1,10 @@
+[build]
+target = "index.html"
+dist = "dist"
+# Static-site deployment: relative asset URLs work under any path
+# (e.g. GitHub Pages project sites at /equiconc/).
+public_url = "./"
+
+[serve]
+port = 8080
+open = false

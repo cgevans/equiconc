@@ -6,6 +6,12 @@
 # proptest, the COFFEE git dep used for cross-checks — are excluded:
 # they ship with neither the crates.io tarball nor the PyPI wheel, so
 # their licenses don't constrain downstream users.
+#
+# The `equiconc-web` workspace member (`publish = false`) is also
+# excluded — its Leptos / Trunk dependency tree is part of the static
+# website artifact, not anything redistributed via crates.io. Licenses
+# in that tree are reviewed via the `web` CI job's bundle-build step,
+# not here.
 
 [graph]
 # Skip dev-dependencies. Avoids needing to allow Apache-2.0 (nalgebra,
@@ -29,13 +35,45 @@ allow = [
 ]
 confidence-threshold = 0.93
 
+# Per-crate license exceptions. Each entry is a permissive license that
+# we accept for one specific crate that ships only inside the
+# `equiconc-web` static-website artifact (see top-of-file scope note).
+# These crates do not ship in the published crates.io tarball or PyPI
+# wheel, so the license obligations apply only to the website bundle.
+exceptions = [
+    # Leptos / Trunk dep tree (web only):
+    { allow = ["CC0-1.0"], crate = "base16" },
+    { allow = ["Zlib"], crate = "const_format" },
+    { allow = ["Zlib"], crate = "const_format_proc_macros" },
+    { allow = ["Zlib"], crate = "konst" },
+    { allow = ["Zlib"], crate = "konst_macro_rules" },
+    { allow = ["Zlib"], crate = "slotmap" },
+    { allow = ["BSL-1.0"], crate = "xxhash-rust" },
+]
+
 [advisories]
 # Fail on any RustSec advisory affecting the runtime tree
 # (vulnerabilities, unmaintained crates, unsound code, yanked versions).
 # Add an entry to `ignore` with a comment if a specific advisory is known
 # to not affect equiconc or is awaiting an upstream fix.
 version = 2
-ignore = []
+ignore = [
+    # `paste` is unmaintained but only pulled in transitively as a
+    # proc-macro build-dep of `pulp` (the SIMD dispatch crate enabled by
+    # the `simd` feature). It runs at compile time, generates code in
+    # pulp, and never executes at runtime — equiconc's runtime safety is
+    # not affected by paste's maintenance status. Re-evaluate when pulp
+    # migrates off paste (it's tracked upstream).
+    "RUSTSEC-2024-0436",
+    # `bincode 1.3.3` is unmaintained (the team ceased development after
+    # an out-of-band incident; the advisory describes the situation
+    # rather than a vulnerability). Pulled in transitively as
+    # gloo-worker → bincode for the worker postMessage codec, used only
+    # in the `equiconc-web` static-website artifact, not in the
+    # published `equiconc` crate. Re-evaluate when gloo-worker upgrades
+    # to bincode 2.x (tracked upstream).
+    "RUSTSEC-2025-0141",
+]
 
 [sources]
 # Refuse runtime crates that come from anywhere other than the default

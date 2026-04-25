@@ -26,8 +26,9 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use clap::Parser;
-use equiconc::{SolverOptions, System};
-use ndarray::{Array1, Array2};
+use equiconc::io::{parse_cfe, parse_concentrations};
+use equiconc::{SolverOptions, System, water_molar_density};
+use ndarray::Array1;
 
 // ---------------------------------------------------------------------------
 // Physical constants
@@ -49,166 +50,6 @@ const T_CELSIUS: f64 = 37.0;
 /// energy units (kcal/mol) rather than unitless `log_q` so the clamp
 /// corresponds to a fixed physical cutoff regardless of temperature.
 const DG_CLAMP_KCAL_PER_MOL: f64 = 230.0;
-
-/// Molar density of liquid water at `t_c` degrees Celsius, returned in
-/// mol/L (= mol/dm³).
-///
-/// Implemented from the empirical mass-density formula of Tanaka et al.
-/// 2001, *Metrologia* 38, 301–309 (VSMOW water, 0–40 °C), converted to
-/// molar units via the IUPAC-recommended molar mass of H₂O,
-/// `M = 18.015 28 g/mol` (Meija et al. 2016, *Pure Appl. Chem.* 88, 265).
-///
-/// Coffee's `density_water` helper is the same math expressed differently;
-/// this implementation was written against the published Tanaka formula
-/// directly, not ported from coffee's source.
-fn density_water_molar(t_c: f64) -> f64 {
-    // Tanaka et al. 2001, Table 1 (constants for VSMOW).
-    const A1: f64 = -3.983_035_f64;
-    const A2: f64 = 301.797_f64;
-    const A3: f64 = 522_528.9_f64;
-    const A4: f64 = 69.348_81_f64;
-    const RHO_MAX_KG_PER_M3: f64 = 999.974_950_f64;
-
-    // Molar mass of water (g/mol).
-    const M_WATER_G_PER_MOL: f64 = 18.015_28_f64;
-
-    let offset = t_c + A1;
-    let mass_density = RHO_MAX_KG_PER_M3 * (1.0 - offset * offset * (t_c + A2) / (A3 * (t_c + A4)));
-    // kg/m³ ÷ g/mol = mol/L (1000 mol/m³ ÷ 1000 L/m³ · g/kg).
-    mass_density / M_WATER_G_PER_MOL
-}
-
-// ---------------------------------------------------------------------------
-// Parsing
-// ---------------------------------------------------------------------------
-
-/// Split a COFFEE-style row into fields.
-///
-/// COFFEE accepts whitespace, comma, semicolon, and pipe separators for
-/// complex tables. Reuse the same delimiter set here so `.csv`/`.tsv`
-/// extensions behave as advertised; empty fields are ignored to match
-/// repeated whitespace behavior.
-fn split_fields(line: &str) -> Vec<&str> {
-    line.split(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | '|'))
-        .filter(|field| !field.is_empty())
-        .collect()
-}
-
-/// Read monomer initial concentrations from a `.con` file.
-///
-/// Format: one f64 per non-blank line, in scientific or decimal notation.
-/// Lines that split into more than one delimited field are rejected —
-/// this preserves the single-column concentration-file contract.
-fn parse_con(content: &str) -> Result<Array1<f64>, String> {
-    let mut values: Vec<f64> = Vec::new();
-    for (lineno, raw) in content.lines().enumerate() {
-        let line = raw.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let tokens = split_fields(line);
-        if tokens.len() != 1 {
-            return Err(format!(
-                ".con line {} has {} delimited fields; expected 1",
-                lineno + 1,
-                tokens.len()
-            ));
-        }
-        let c: f64 = tokens[0].parse().map_err(|_| {
-            format!(
-                ".con line {}: could not parse {:?} as a number",
-                lineno + 1,
-                tokens[0]
-            )
-        })?;
-        values.push(c);
-    }
-    if values.is_empty() {
-        return Err(".con file contained no numeric entries".to_string());
-    }
-    Ok(Array1::from_vec(values))
-}
-
-/// Read the stoichiometry matrix and reference free energies from an
-/// `.ocx` / `.cfe` file.
-///
-/// Returns `(A, ΔG)` where `A` is `n_species × n_mon` and `ΔG` is the
-/// per-species reference free energy in kcal/mol. The first `n_mon` rows
-/// must be the identity block (species = monomer).
-///
-/// The NUPACK layout is auto-detected by inspecting the first `min(n, 20)`
-/// rows: if every row has `col0 == row_num + 1` and `col1 == 1`, those two
-/// leading columns are treated as bookkeeping and dropped. Otherwise the
-/// row is taken to be `[stoich_1, .., stoich_{n_mon}, ΔG]` directly.
-/// Fields may be separated by whitespace, comma, semicolon, or pipe.
-fn parse_ocx(content: &str, n_mon: usize) -> Result<(Array2<f64>, Array1<f64>), String> {
-    let rows: Vec<Vec<String>> = content
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .map(|l| split_fields(l).into_iter().map(str::to_owned).collect())
-        .collect();
-
-    if rows.is_empty() {
-        return Err("ocx/cfe file contained no data rows".into());
-    }
-
-    let nupack = detect_nupack_header(&rows);
-    let cols_expected_raw = if nupack { n_mon + 3 } else { n_mon + 1 };
-
-    let n_species = rows.len();
-    let mut stoich = Array2::<f64>::zeros((n_species, n_mon));
-    let mut dg = Array1::<f64>::zeros(n_species);
-
-    for (i, row) in rows.iter().enumerate() {
-        if row.len() != cols_expected_raw {
-            return Err(format!(
-                "ocx/cfe row {} has {} fields, expected {}",
-                i + 1,
-                row.len(),
-                cols_expected_raw
-            ));
-        }
-
-        let stoich_start = if nupack { 2 } else { 0 };
-        for j in 0..n_mon {
-            stoich[[i, j]] = row[stoich_start + j].parse::<f64>().map_err(|_| {
-                format!(
-                    "ocx/cfe row {}: could not parse stoichiometry {:?} as a number",
-                    i + 1,
-                    row[stoich_start + j]
-                )
-            })?;
-        }
-        let dg_idx = row.len() - 1;
-        dg[i] = row[dg_idx].parse::<f64>().map_err(|_| {
-            format!(
-                "ocx/cfe row {}: could not parse ΔG {:?} as a number",
-                i + 1,
-                row[dg_idx]
-            )
-        })?;
-    }
-
-    Ok((stoich, dg))
-}
-
-/// Return `true` iff the leading columns of each row look like NUPACK
-/// bookkeeping (`col0 = row+1`, `col1 = 1`) for every sampled row.
-fn detect_nupack_header(rows: &[Vec<String>]) -> bool {
-    let sample = rows.len().min(20);
-    for (i, row) in rows.iter().take(sample).enumerate() {
-        if row.len() < 3 {
-            return false;
-        }
-        let c0 = row[0].parse::<i64>().ok();
-        let c1 = row[1].parse::<i64>().ok();
-        if c0 != Some((i + 1) as i64) || c1 != Some(1) {
-            return false;
-        }
-    }
-    true
-}
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -335,31 +176,6 @@ fn format_log(cli: &Cli, stats: &LogStats, results: &str) -> String {
     s
 }
 
-/// Largest absolute per-monomer mass-balance deviation:
-/// `max_i |c0_i − Σ_j A_{ji} · c_j|`.
-///
-/// Inputs are in the user-facing (pre-scaling) units: `c0_original` is the
-/// un-scaled concentrations from `.con`, `conc` are the solved
-/// concentrations already rescaled back out of mole-fraction space.
-fn mass_balance_residual(a: &Array2<f64>, c0_original: &Array1<f64>, conc: &[f64]) -> f64 {
-    let n_mon = c0_original.len();
-    let n_species = a.nrows();
-    debug_assert_eq!(conc.len(), n_species);
-
-    let mut worst: f64 = 0.0;
-    for i in 0..n_mon {
-        let mut total = 0.0;
-        for j in 0..n_species {
-            total += a[[j, i]] * conc[j];
-        }
-        let diff = (c0_original[i] - total).abs();
-        if diff > worst {
-            worst = diff;
-        }
-    }
-    worst
-}
-
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -370,10 +186,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cfe_content = read_file(&cli.cfe, "complex table")?;
     let con_content = read_file(&cli.con, "concentrations")?;
 
-    let c0 = parse_con(&con_content)?;
+    let c0 = parse_concentrations(&con_content)?;
     let n_mon = c0.len();
 
-    let (stoich, dg) = parse_ocx(&cfe_content, n_mon)?;
+    let (stoich, dg) = parse_cfe(&cfe_content, n_mon)?;
     let n_species = stoich.nrows();
     if n_species < n_mon {
         return Err(format!("need at least n_mon={n_mon} species in ocx (got {n_species})").into());
@@ -385,7 +201,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Monomer rows carry ΔG = 0 and are unaffected.
     let log_q = dg.mapv(|g| -g.max(-DG_CLAMP_KCAL_PER_MOL) / rt);
 
-    let rho_water = density_water_molar(T_CELSIUS);
+    let rho_water = water_molar_density(T_CELSIUS);
     let c0_fraction = c0.mapv(|c| c / rho_water);
 
     // No `log_q_clamp` in `SolverOptions` — we've already applied the
@@ -406,10 +222,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let iterations = eq.iterations();
     let converged_fully = eq.converged_fully();
 
-    let concentrations: Vec<f64> = eq.concentrations().iter().map(|c| c * rho_water).collect();
+    let concentrations: Array1<f64> = eq.concentrations().iter().map(|c| c * rho_water).collect();
 
-    let residual = mass_balance_residual(&stoich, &c0, &concentrations);
-    let results_str = format_results(&concentrations);
+    let residual = equiconc::mass_balance_residual(stoich.view(), c0.view(), concentrations.view());
+    let results_str = format_results(concentrations.as_slice().expect("contiguous"));
     let stats = LogStats {
         n_mon,
         n_species,
@@ -459,126 +275,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn density_water_matches_reference_values() {
-        // Reference values from Tanaka et al. 2001 Table 2 (kg/m³)
-        // divided by M = 18.01528 g/mol to convert to mol/L.
-        // At 0°C:   999.8395 / 18.01528 = 55.498...
-        // At 25°C:  997.0479 / 18.01528 = 55.343...
-        // At 37°C:  993.3317 / 18.01528 = 55.137...
-        let cases = [
-            (0.0_f64, 55.498_f64),
-            (25.0_f64, 55.343_f64),
-            (37.0_f64, 55.137_f64),
-        ];
-        for (t, expected) in cases {
-            let got = density_water_molar(t);
-            assert!(
-                (got - expected).abs() / expected < 1e-3,
-                "ρ(T={t} °C) = {got}, expected ≈ {expected}"
-            );
-        }
-    }
-
-    #[test]
-    fn parse_con_rejects_multi_column() {
-        let content = "1.0e-6\n2.0e-6,oops\n";
-        assert!(parse_con(content).is_err());
-    }
-
-    #[test]
-    fn parse_con_accepts_blank_lines_and_whitespace() {
-        let content = "\n  1.0e-6\n\n2.0e-6\n";
-        let got = parse_con(content).unwrap();
-        assert_eq!(got.len(), 2);
-        assert!((got[0] - 1.0e-6).abs() < 1e-18);
-        assert!((got[1] - 2.0e-6).abs() < 1e-18);
-    }
-
-    #[test]
-    fn parse_ocx_nupack_layout() {
-        // 2 monomers, 3 species (2 identity + 1 AB complex).
-        let content = "\
-1\t1\t1\t0\t0.0
-2\t1\t0\t1\t0.0
-3\t1\t1\t1\t-5.0
-";
-        let (a, dg) = parse_ocx(content, 2).unwrap();
-        assert_eq!(a.shape(), &[3, 2]);
-        assert_eq!(a[[0, 0]], 1.0);
-        assert_eq!(a[[0, 1]], 0.0);
-        assert_eq!(a[[1, 0]], 0.0);
-        assert_eq!(a[[1, 1]], 1.0);
-        assert_eq!(a[[2, 0]], 1.0);
-        assert_eq!(a[[2, 1]], 1.0);
-        assert_eq!(dg[0], 0.0);
-        assert_eq!(dg[1], 0.0);
-        assert_eq!(dg[2], -5.0);
-    }
-
-    #[test]
-    fn parse_ocx_raw_layout() {
-        // Same system without NUPACK bookkeeping columns.
-        let content = "\
-1\t0\t0.0
-0\t1\t0.0
-1\t1\t-5.0
-";
-        let (a, dg) = parse_ocx(content, 2).unwrap();
-        assert_eq!(a.shape(), &[3, 2]);
-        assert_eq!(a[[2, 0]], 1.0);
-        assert_eq!(a[[2, 1]], 1.0);
-        assert_eq!(dg[2], -5.0);
-    }
-
-    #[test]
-    fn parse_ocx_raw_layout_accepts_coffee_delimiters() {
-        let content = "\
-1,0,0.0
-0;1;0.0
-1|1|-5.0
-";
-        let (a, dg) = parse_ocx(content, 2).unwrap();
-        assert_eq!(a.shape(), &[3, 2]);
-        assert_eq!(a[[0, 0]], 1.0);
-        assert_eq!(a[[1, 1]], 1.0);
-        assert_eq!(a[[2, 0]], 1.0);
-        assert_eq!(a[[2, 1]], 1.0);
-        assert_eq!(dg[2], -5.0);
-    }
-
-    #[test]
-    fn parse_ocx_nupack_layout_accepts_csv() {
-        let content = "\
-1,1,1,0,0.0
-2,1,0,1,0.0
-3,1,1,1,-5.0
-";
-        let (a, dg) = parse_ocx(content, 2).unwrap();
-        assert_eq!(a.shape(), &[3, 2]);
-        assert_eq!(a[[2, 0]], 1.0);
-        assert_eq!(a[[2, 1]], 1.0);
-        assert_eq!(dg[2], -5.0);
-    }
-
-    #[test]
-    fn parse_ocx_rejects_wrong_width() {
-        let content = "1\t1\t1\t0\t0\t0.0\n";
-        assert!(parse_ocx(content, 2).is_err());
-    }
-
-    #[test]
     fn results_format_is_byte_compatible() {
-        // Two values, 2-sf scientific, single trailing space, no newline.
         let s = format_results(&[1.23e-8, 4.56e-6]);
         assert_eq!(s, "1.23e-8 4.56e-6 ");
-    }
-
-    #[test]
-    fn mass_balance_residual_is_zero_on_identity() {
-        // If A is identity and conc = c0, residual = 0.
-        let a = ndarray::arr2(&[[1.0, 0.0], [0.0, 1.0]]);
-        let c0 = ndarray::arr1(&[1e-6, 2e-6]);
-        let r = mass_balance_residual(&a, &c0, &[1e-6, 2e-6]);
-        assert!(r < 1e-20);
     }
 }

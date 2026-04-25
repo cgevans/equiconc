@@ -1,3 +1,6 @@
+[workspace]
+members = ["web"]
+
 [package]
 name = "equiconc"
 version = "0.3.0"
@@ -27,6 +30,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 ndarray = "0.17"
+pulp = { version = "0.22", optional = true }
 pyo3 = { version = "0.28", optional = true, features = ["extension-module", "abi3-py310"] }
 clap = { version = "4", optional = true, features = ["derive"] }
 
@@ -46,6 +50,11 @@ coffee = { git = "https://github.com/cgevans/coffee", rev = "6fdcd67a5e50a306b03
 default = []
 python = ["pyo3"]
 coffee-cli = ["dep:clap"]
+# Vectorize the per-species element-wise hot loops in evaluate_into and
+# evaluate_log_into via `pulp` (runtime-dispatch SIMD). Opt-in: enable
+# with `cargo build --features simd` (or `--features python,simd` for
+# the Python wheel) to get the polynomial-exp linear-path speedup.
+simd = ["dep:pulp"]
 
 [[bin]]
 name = "equiconc-coffee-cli"

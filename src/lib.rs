@@ -106,6 +106,12 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayViewMut1, s};
 use std::collections::HashMap;
 use std::ops::Index;
 
+pub mod io;
+mod simd_kernels;
+mod water;
+use simd_kernels::Kernels;
+pub use water::water_molar_density;
+
 /// Gas constant in kcal/(mol·K).
 pub const R: f64 = 1.987204e-3;
 
@@ -137,6 +143,10 @@ pub enum EquilibriumError {
     ConvergenceFailure {
         iterations: usize,
         gradient_norm: f64,
+    },
+    /// The progress callback returned [`SolveControl::Abort`].
+    Aborted {
+        iterations: usize,
     },
 }
 
@@ -177,6 +187,12 @@ impl std::fmt::Display for EquilibriumError {
                 f,
                 "did not converge after {iterations} iterations (‖∇‖ = {gradient_norm:.2e})"
             ),
+            Self::Aborted { iterations } => {
+                write!(
+                    f,
+                    "solve aborted by progress callback after {iterations} iterations"
+                )
+            }
         }
     }
 }
@@ -248,6 +264,38 @@ pub enum SolverObjective {
     Linear,
     /// Log-dual `g(λ) = ln f(λ)` (faster on stiff systems; non-convex).
     Log,
+}
+
+/// Snapshot of the solver state passed to a progress callback once per
+/// outer trust-region iteration. See [`System::solve_with_progress`].
+#[derive(Debug, Clone, Copy)]
+pub struct IterationStatus {
+    /// Number of completed outer iterations (1-based — `1` means the
+    /// first iteration just finished evaluating).
+    pub iteration: usize,
+    /// 2-norm of the primal mass-conservation residual `∇f = Ac − c⁰`.
+    /// This is the same gradient the convergence test inspects component-
+    /// wise; the norm is provided for convenient log-scale plotting.
+    pub gradient_norm: f64,
+    /// Current objective value: `f(λ)` for [`SolverObjective::Linear`],
+    /// `g(λ) = ln f(λ)` for [`SolverObjective::Log`].
+    pub objective: f64,
+    /// Current trust-region radius δ. Useful as a coarse health signal:
+    /// δ shrinking quickly suggests rejected steps; δ at `max_trust_region_radius`
+    /// suggests the model is fitting cleanly.
+    pub trust_radius: f64,
+}
+
+/// Return value of a progress callback. Returning [`SolveControl::Abort`]
+/// short-circuits the solve with [`EquilibriumError::Aborted`]; the
+/// system's `lambda` and primal concentrations reflect the last
+/// completed iteration but are not guaranteed to be a valid solution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SolveControl {
+    /// Keep iterating.
+    Continue,
+    /// Stop the solve and return [`EquilibriumError::Aborted`].
+    Abort,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -940,6 +988,9 @@ pub struct System {
     /// `true` when `solution` reflects the current `inputs`. Flipped off
     /// by any mutating accessor; flipped on by a successful `solve`.
     fresh: bool,
+    /// Cached SIMD dispatch state. Built once per `System`; reused
+    /// across solves and across the per-iteration eval calls.
+    kernels: Kernels,
 }
 
 impl System {
@@ -963,6 +1014,7 @@ impl System {
             names,
             options,
             fresh: false,
+            kernels: Kernels::new(),
         }
     }
 
@@ -1062,6 +1114,25 @@ impl System {
     /// If `self` is already fresh (no mutation since the last successful
     /// solve), this returns the cached result with no recomputation.
     pub fn solve(&mut self) -> Result<Equilibrium<'_>, EquilibriumError> {
+        self.solve_with_progress(|_| SolveControl::Continue)
+    }
+
+    /// Like [`System::solve`], but invokes `on_iter` once per completed
+    /// outer trust-region iteration. The callback receives an
+    /// [`IterationStatus`] snapshot and may return [`SolveControl::Abort`]
+    /// to short-circuit the solve with [`EquilibriumError::Aborted`].
+    ///
+    /// The callback is *not* invoked on the cached-fresh fast path or
+    /// when the system has no complexes (the closed-form short-circuit).
+    /// In both of those cases the solve completes without any
+    /// trust-region iterations, so there's nothing to report.
+    pub fn solve_with_progress<F>(
+        &mut self,
+        mut on_iter: F,
+    ) -> Result<Equilibrium<'_>, EquilibriumError>
+    where
+        F: FnMut(&IterationStatus) -> SolveControl,
+    {
         if !self.fresh {
             self.options.validate()?;
             validate_inputs(&self.inputs)?;
@@ -1070,6 +1141,8 @@ impl System {
                 &mut self.work,
                 &mut self.solution,
                 &self.options,
+                self.kernels,
+                &mut on_iter,
             )?;
             self.fresh = true;
         }
@@ -1313,6 +1386,59 @@ impl<'a> Equilibrium<'a> {
     pub fn at(&self, idx: usize) -> f64 {
         self.sys.solution.concentrations[idx]
     }
+
+    /// Largest absolute per-monomer mass-balance deviation against a
+    /// supplied vector of total monomer concentrations:
+    /// `max_i |c0_i − Σ_j A_{ji} · c_j|`.
+    ///
+    /// Pass the original (pre-scaling) `c0` if you have rescaled
+    /// concentrations out of mole-fraction space; otherwise the
+    /// `System`'s stored `c0` is the natural choice (use
+    /// [`Equilibrium::mass_balance_residual_self`]).
+    #[must_use]
+    pub fn mass_balance_residual(&self, c0: ArrayView1<'_, f64>) -> f64 {
+        mass_balance_residual(self.sys.stoichiometry(), c0, self.concentrations())
+    }
+
+    /// Largest absolute per-monomer mass-balance deviation against the
+    /// system's stored `c0`. Useful as a sanity check when no rescaling
+    /// is applied outside the solver.
+    #[must_use]
+    pub fn mass_balance_residual_self(&self) -> f64 {
+        mass_balance_residual(
+            self.sys.stoichiometry(),
+            self.sys.c0(),
+            self.concentrations(),
+        )
+    }
+}
+
+/// Largest absolute per-monomer mass-balance deviation:
+/// `max_i |c0_i − Σ_j A_{ji} · c_j|`.
+///
+/// `a` is `n_species × n_mon`; `c0` is `n_mon`; `conc` is `n_species`.
+#[must_use]
+pub fn mass_balance_residual(
+    a: ArrayView2<'_, f64>,
+    c0: ArrayView1<'_, f64>,
+    conc: ArrayView1<'_, f64>,
+) -> f64 {
+    let n_mon = c0.len();
+    let n_species = a.nrows();
+    debug_assert_eq!(conc.len(), n_species);
+
+    let mut worst: f64 = 0.0;
+    for i in 0..n_mon {
+        let mut total = 0.0;
+        for j in 0..n_species {
+            total += a[[j, i]] * conc[j];
+        }
+        let diff = (c0[i] - total).abs();
+        if diff > worst {
+            worst = diff;
+        }
+    }
+    worst
 }
 
 impl Index<&str> for Equilibrium<'_> {
@@ -1342,6 +1468,8 @@ fn solve_inputs_into(
     work: &mut WorkBuffers,
     solution: &mut SolutionStorage,
     options: &SolverOptions,
+    kernels: Kernels,
+    on_iter: &mut dyn FnMut(&IterationStatus) -> SolveControl,
 ) -> Result<(), EquilibriumError> {
     let n_species = inputs.at.nrows();
     let n_mon = inputs.at.ncols();
@@ -1365,6 +1493,8 @@ fn solve_inputs_into(
         &mut solution.lambda,
         work,
         options,
+        kernels,
+        on_iter,
     )?;
 
     // `work.c` holds the concentrations at `solution.lambda` after the
@@ -1589,18 +1719,23 @@ fn evaluate_into(
     grad: &mut Array1<f64>,
     hessian: &mut Array2<f64>,
     log_c_clamp: f64,
+    kernels: Kernels,
 ) -> f64 {
     // c = exp(min(log_q + Aᵀλ, log_c_clamp))
     ndarray::linalg::general_mat_vec_mul(1.0, at, lambda, 0.0, c);
-    *c += log_q;
-    c.mapv_inplace(|lc| lc.min(log_c_clamp).exp());
+    let c_slice = c.as_slice_mut().expect("c buffer must be contiguous");
+    let log_q_slice = log_q.as_slice().expect("log_q must be contiguous");
+    kernels.add_inplace(c_slice, log_q_slice);
+    let c_sum = kernels.min_clamp_exp_inplace_sum(c_slice, log_c_clamp);
 
     // f = -λᵀc⁰ + Σ_j c_j
-    let f = -lambda.dot(c0) + c.sum();
+    let f = -lambda.dot(c0) + c_sum;
 
     // grad = -c⁰ + Aᵀᵀ·c
     ndarray::linalg::general_mat_vec_mul(1.0, &at.t(), c, 0.0, grad);
-    *grad -= c0;
+    let grad_slice = grad.as_slice_mut().expect("grad must be contiguous");
+    let c0_slice = c0.as_slice().expect("c0 must be contiguous");
+    kernels.sub_inplace(grad_slice, c0_slice);
 
     // H = A diag(c) Aᵀ (sparse loop)
     hessian.fill(0.0);
@@ -1628,10 +1763,13 @@ fn evaluate_objective_into(
     lambda: &Array1<f64>,
     c_buf: &mut Array1<f64>,
     log_c_clamp: f64,
+    kernels: Kernels,
 ) -> f64 {
     ndarray::linalg::general_mat_vec_mul(1.0, at, lambda, 0.0, c_buf);
-    *c_buf += log_q;
-    let c_sum: f64 = c_buf.iter().map(|&lc| lc.min(log_c_clamp).exp()).sum();
+    let c_slice = c_buf.as_slice_mut().expect("c_buf must be contiguous");
+    let log_q_slice = log_q.as_slice().expect("log_q must be contiguous");
+    kernels.add_inplace(c_slice, log_q_slice);
+    let c_sum = kernels.min_clamp_exp_sum(c_slice, log_c_clamp);
 
     -lambda.dot(c0) + c_sum
 }
@@ -1688,36 +1826,23 @@ fn evaluate_log_into(
     grad_g: &mut Array1<f64>,
     hessian: &mut Array2<f64>,
     log_c_clamp: f64,
+    kernels: Kernels,
 ) -> LogEval {
-    // First pass: compute t_j = log_q_j + (Aᵀλ)_j into `c` (reused as
-    // scratch), find the max, then assemble both:
-    //   (1) c_j = exp(min(t_j, log_c_clamp))   [for gradient/Hessian]
-    //   (2) lse = max + ln(Σⱼ exp(t_j − max))  [for the objective]
+    // Compute t_j = log_q_j + (Aᵀλ)_j into `c`, then have the kernel:
+    //   (1) reduce t_max,
+    //   (2) accumulate lse = max + ln(Σⱼ exp(t_j − max))   [un-clamped],
+    //   (3) overwrite c = exp(min(t_j, log_c_clamp))       [gradient/Hessian].
     //
     // Computing `lse` from un-clamped `t_j` is essential: clamping inside
     // the log-sum-exp would silently bias `f`, corrupting ρ. The clamp is
     // only safe for the matrix products that follow (where the dropped
     // mass is below f64 resolution anyway).
     ndarray::linalg::general_mat_vec_mul(1.0, at, lambda, 0.0, c);
-    *c += log_q;
-
-    let mut t_max = f64::NEG_INFINITY;
-    for &t in c.iter() {
-        if t > t_max {
-            t_max = t;
-        }
-    }
-
-    // log-sum-exp on un-clamped t. Even when t_max > 700, exp(0) + ... is
-    // finite and `lse` is `t_max + small`.
-    let mut sum_shifted = 0.0;
-    for &t in c.iter() {
-        sum_shifted += (t - t_max).exp();
-    }
+    let c_slice = c.as_slice_mut().expect("c buffer must be contiguous");
+    let log_q_slice = log_q.as_slice().expect("log_q must be contiguous");
+    kernels.add_inplace(c_slice, log_q_slice);
+    let (t_max, sum_shifted) = kernels.fused_lse_and_exp_clamp(c_slice, log_c_clamp);
     let lse = t_max + sum_shifted.ln();
-
-    // Now realize c = exp(min(t, log_c_clamp)) for the gradient/Hessian.
-    c.mapv_inplace(|t| t.min(log_c_clamp).exp());
 
     // f = exp(lse) − λᵀc⁰. exp(lse) overflows to +∞ only when t_max > 709;
     // in that regime we'll have clamped c (so grad/Hess are finite) but
@@ -1729,7 +1854,9 @@ fn evaluate_log_into(
 
     // ∇f = Aᵀc − c⁰. Always finite given clamped c.
     ndarray::linalg::general_mat_vec_mul(1.0, &at.t(), c, 0.0, grad);
-    *grad -= c0;
+    let grad_slice = grad.as_slice_mut().expect("grad must be contiguous");
+    let c0_slice = c0.as_slice().expect("c0 must be contiguous");
+    kernels.sub_inplace(grad_slice, c0_slice);
 
     if f <= 0.0 || !f.is_finite() {
         return LogEval {
@@ -1741,9 +1868,9 @@ fn evaluate_log_into(
 
     // ∇g = ∇f / f
     let inv_f = 1.0 / f;
-    for (gg, &gf) in grad_g.iter_mut().zip(grad.iter()) {
-        *gg = gf * inv_f;
-    }
+    let grad_g_slice = grad_g.as_slice_mut().expect("grad_g must be contiguous");
+    let grad_view = grad.as_slice().expect("grad must be contiguous");
+    kernels.scale_into(grad_g_slice, grad_view, inv_f);
 
     // H_g = H_f / f − ∇f ∇fᵀ / f². Build H_f / f first via the same
     // sparse loop used by the linear path, scaling c by 1/f at the
@@ -1785,20 +1912,14 @@ fn evaluate_objective_log_into(
     c0: &Array1<f64>,
     lambda: &Array1<f64>,
     c_buf: &mut Array1<f64>,
+    kernels: Kernels,
 ) -> LogEval {
     ndarray::linalg::general_mat_vec_mul(1.0, at, lambda, 0.0, c_buf);
-    *c_buf += log_q;
+    let c_slice = c_buf.as_slice_mut().expect("c_buf must be contiguous");
+    let log_q_slice = log_q.as_slice().expect("log_q must be contiguous");
+    kernels.add_inplace(c_slice, log_q_slice);
 
-    let mut t_max = f64::NEG_INFINITY;
-    for &t in c_buf.iter() {
-        if t > t_max {
-            t_max = t;
-        }
-    }
-    let mut sum_shifted = 0.0;
-    for &t in c_buf.iter() {
-        sum_shifted += (t - t_max).exp();
-    }
+    let (t_max, sum_shifted) = kernels.lse_sum(c_slice);
     let lse = t_max + sum_shifted.ln();
 
     let f = lse.exp() - lambda.dot(c0);
@@ -1929,6 +2050,7 @@ enum SolverConvergence {
 /// - [`solve_dual_log_into`]: minimizes `g(λ) = ln f(λ)` with on-the-fly
 ///   modified-Cholesky regularization, primal-residual convergence, and
 ///   `f > 0` step rejection — see `solve_dual_log_into` for the details.
+#[allow(clippy::too_many_arguments)]
 fn solve_dual_into(
     at: &Array2<f64>,
     at_nz: &[Vec<(usize, f64)>],
@@ -1937,13 +2059,20 @@ fn solve_dual_into(
     lambda: &mut Array1<f64>,
     work: &mut WorkBuffers,
     opts: &SolverOptions,
+    kernels: Kernels,
+    on_iter: &mut dyn FnMut(&IterationStatus) -> SolveControl,
 ) -> Result<SolverConvergence, EquilibriumError> {
     match opts.objective {
-        SolverObjective::Linear => solve_dual_linear_into(at, at_nz, log_q, c0, lambda, work, opts),
-        SolverObjective::Log => solve_dual_log_into(at, at_nz, log_q, c0, lambda, work, opts),
+        SolverObjective::Linear => {
+            solve_dual_linear_into(at, at_nz, log_q, c0, lambda, work, opts, kernels, on_iter)
+        }
+        SolverObjective::Log => {
+            solve_dual_log_into(at, at_nz, log_q, c0, lambda, work, opts, kernels, on_iter)
+        }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn solve_dual_linear_into(
     at: &Array2<f64>,
     at_nz: &[Vec<(usize, f64)>],
@@ -1952,6 +2081,8 @@ fn solve_dual_linear_into(
     lambda: &mut Array1<f64>,
     work: &mut WorkBuffers,
     opts: &SolverOptions,
+    kernels: Kernels,
+    on_iter: &mut dyn FnMut(&IterationStatus) -> SolveControl,
 ) -> Result<SolverConvergence, EquilibriumError> {
     let max_iter = opts.max_iterations;
     let atol = opts.gradient_abs_tol;
@@ -1991,11 +2122,34 @@ fn solve_dual_linear_into(
     }
 
     for iter in 0..max_iter {
-        let f = evaluate_into(at, at_nz, log_q, c0, lambda, c, grad, hessian, log_c_clamp);
+        let f = evaluate_into(
+            at,
+            at_nz,
+            log_q,
+            c0,
+            lambda,
+            c,
+            grad,
+            hessian,
+            log_c_clamp,
+            kernels,
+        );
 
         if trace {
             let g_inf = grad.iter().map(|g: &f64| g.abs()).fold(0.0_f64, f64::max);
             eprintln!("{iter}\t{f:.15e}\t{g_inf:.6e}\t{delta:.3e}\t{stagnation}");
+        }
+
+        let status = IterationStatus {
+            iteration: iter + 1,
+            gradient_norm: norm(grad),
+            objective: f,
+            trust_radius: delta,
+        };
+        if on_iter(&status) == SolveControl::Abort {
+            return Err(EquilibriumError::Aborted {
+                iterations: iter + 1,
+            });
         }
 
         if grad
@@ -2012,7 +2166,7 @@ fn solve_dual_linear_into(
 
         lambda_new.assign(lambda);
         *lambda_new += &*step;
-        let f_new = evaluate_objective_into(at, log_q, c0, lambda_new, c, log_c_clamp);
+        let f_new = evaluate_objective_into(at, log_q, c0, lambda_new, c, log_c_clamp, kernels);
 
         let actual_reduction = f - f_new;
         let predicted_reduction = -(grad.dot(&*step) + 0.5 * quadratic_form(hessian, &*step));
@@ -2037,6 +2191,7 @@ fn solve_dual_linear_into(
                 grad,
                 hessian,
                 log_c_clamp,
+                kernels,
             );
             if f_full <= f {
                 std::mem::swap(lambda, lambda_new);
@@ -2067,7 +2222,18 @@ fn solve_dual_linear_into(
             }
             // Recovery failed: re-evaluate at (unchanged) lambda so that
             // grad/c buffers match.
-            evaluate_into(at, at_nz, log_q, c0, lambda, c, grad, hessian, log_c_clamp);
+            evaluate_into(
+                at,
+                at_nz,
+                log_q,
+                c0,
+                lambda,
+                c,
+                grad,
+                hessian,
+                log_c_clamp,
+                kernels,
+            );
             if grad
                 .iter()
                 .zip(c0.iter())
@@ -2101,7 +2267,18 @@ fn solve_dual_linear_into(
         }
     }
 
-    evaluate_into(at, at_nz, log_q, c0, lambda, c, grad, hessian, log_c_clamp);
+    evaluate_into(
+        at,
+        at_nz,
+        log_q,
+        c0,
+        lambda,
+        c,
+        grad,
+        hessian,
+        log_c_clamp,
+        kernels,
+    );
     Err(EquilibriumError::ConvergenceFailure {
         iterations: max_iter,
         gradient_norm: norm(grad),
@@ -2141,6 +2318,7 @@ fn solve_dual_linear_into(
 ///    pathology (`ρ = (−)/(−) > 0 → grow δ on a worsening step`). A
 ///    defensive `pred ≤ 0 → ρ = -1` sentinel covers the residual case
 ///    where regularization saturates.
+#[allow(clippy::too_many_arguments)]
 fn solve_dual_log_into(
     at: &Array2<f64>,
     at_nz: &[Vec<(usize, f64)>],
@@ -2149,6 +2327,8 @@ fn solve_dual_log_into(
     lambda: &mut Array1<f64>,
     work: &mut WorkBuffers,
     opts: &SolverOptions,
+    kernels: Kernels,
+    on_iter: &mut dyn FnMut(&IterationStatus) -> SolveControl,
 ) -> Result<SolverConvergence, EquilibriumError> {
     let max_iter = opts.max_iterations;
     let atol = opts.gradient_abs_tol;
@@ -2189,11 +2369,22 @@ fn solve_dual_log_into(
     // enter the basin where `g = ln f` is well-defined. Internal-only —
     // not user-visible.
     {
-        let probe = evaluate_objective_log_into(at, log_q, c0, lambda, c);
+        let probe = evaluate_objective_log_into(at, log_q, c0, lambda, c, kernels);
         if !probe.f_positive {
             // Re-evaluate the linear objective at λ to populate grad/hessian
             // for the linear bootstrap step.
-            let _f_lin = evaluate_into(at, at_nz, log_q, c0, lambda, c, grad, hessian, log_c_clamp);
+            let _f_lin = evaluate_into(
+                at,
+                at_nz,
+                log_q,
+                c0,
+                lambda,
+                c,
+                grad,
+                hessian,
+                log_c_clamp,
+                kernels,
+            );
             // One unconstrained Newton step on f. If Cholesky fails (it
             // shouldn't — H_f is PSD by construction), bail out: this
             // input is not log-tractable and shouldn't have used Log.
@@ -2228,6 +2419,7 @@ fn solve_dual_log_into(
             grad_g,
             hessian,
             log_c_clamp,
+            kernels,
         );
 
         if !eval.f_positive {
@@ -2244,6 +2436,18 @@ fn solve_dual_log_into(
         if trace {
             let g_inf = grad.iter().map(|gv: &f64| gv.abs()).fold(0.0_f64, f64::max);
             eprintln!("{iter}\t{g:.15e}\t{f:.6e}\t{g_inf:.6e}\t{delta:.3e}\t-\t{stagnation}");
+        }
+
+        let status = IterationStatus {
+            iteration: iter + 1,
+            gradient_norm: norm(grad),
+            objective: g,
+            trust_radius: delta,
+        };
+        if on_iter(&status) == SolveControl::Abort {
+            return Err(EquilibriumError::Aborted {
+                iterations: iter + 1,
+            });
         }
 
         // Convergence test on the *primal residual* — same criterion as
@@ -2282,7 +2486,7 @@ fn solve_dual_log_into(
 
         lambda_new.assign(lambda);
         *lambda_new += &*step;
-        let cand = evaluate_objective_log_into(at, log_q, c0, lambda_new, c);
+        let cand = evaluate_objective_log_into(at, log_q, c0, lambda_new, c, kernels);
 
         // Step rejection on f_new ≤ 0 (Bug 1 protection): force ρ < 0.
         let (actual_reduction, predicted_reduction);
@@ -2308,7 +2512,7 @@ fn solve_dual_log_into(
             dogleg_step_into(grad_g, hessian_reg, delta_max, full_step, dogleg);
             lambda_new.assign(lambda);
             *lambda_new += &*full_step;
-            let probe = evaluate_objective_log_into(at, log_q, c0, lambda_new, c);
+            let probe = evaluate_objective_log_into(at, log_q, c0, lambda_new, c, kernels);
             let accept = probe.f_positive && probe.g <= g;
             if accept {
                 std::mem::swap(lambda, lambda_new);
@@ -2323,6 +2527,7 @@ fn solve_dual_log_into(
                     grad_g,
                     hessian,
                     log_c_clamp,
+                    kernels,
                 );
 
                 if grad
@@ -2361,6 +2566,7 @@ fn solve_dual_log_into(
                 grad_g,
                 hessian,
                 log_c_clamp,
+                kernels,
             );
             if grad
                 .iter()
@@ -2411,6 +2617,7 @@ fn solve_dual_log_into(
         grad_g,
         hessian,
         log_c_clamp,
+        kernels,
     );
     Err(EquilibriumError::ConvergenceFailure {
         iterations: max_iter,
@@ -2433,6 +2640,100 @@ mod tests {
             .monomer("A", 100.0 * NM)
             .monomer("B", 100.0 * NM)
             .complex("AB", &[("A", 1), ("B", 1)], -10.0)
+    }
+
+    #[test]
+    fn solve_with_progress_fires_each_iteration_and_records_iteration_count() {
+        let mut sys = simple_builder().build().unwrap();
+        let mut history: Vec<IterationStatus> = Vec::new();
+        let eq = sys
+            .solve_with_progress(|s| {
+                history.push(*s);
+                SolveControl::Continue
+            })
+            .unwrap();
+        let reported = eq.iterations();
+        assert_eq!(history.len(), reported);
+        // Iteration counts are 1-based and contiguous.
+        for (i, status) in history.iter().enumerate() {
+            assert_eq!(status.iteration, i + 1);
+            assert!(status.gradient_norm.is_finite());
+            assert!(status.objective.is_finite());
+            assert!(status.trust_radius > 0.0);
+        }
+        // Gradient norm should be monotonically non-increasing on this
+        // benign convex problem (modulo trust-region wobble at the very
+        // start). We only assert the last is below the first.
+        if let (Some(first), Some(last)) = (history.first(), history.last()) {
+            assert!(last.gradient_norm < first.gradient_norm);
+        }
+    }
+
+    #[test]
+    fn solve_with_progress_abort_returns_aborted_error() {
+        let mut sys = simple_builder().build().unwrap();
+        let err = sys
+            .solve_with_progress(|s| {
+                if s.iteration >= 2 {
+                    SolveControl::Abort
+                } else {
+                    SolveControl::Continue
+                }
+            })
+            .unwrap_err();
+        match err {
+            EquilibriumError::Aborted { iterations } => assert_eq!(iterations, 2),
+            other => panic!("expected Aborted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn solve_with_progress_skips_callback_on_no_complexes_short_circuit() {
+        let mut sys = SystemBuilder::new()
+            .monomer("A", 50e-9)
+            .monomer("B", 100e-9)
+            .build()
+            .unwrap();
+        let mut fired = 0u32;
+        let eq = sys
+            .solve_with_progress(|_| {
+                fired += 1;
+                SolveControl::Continue
+            })
+            .unwrap();
+        assert_eq!(fired, 0);
+        assert_eq!(eq.iterations(), 0);
+    }
+
+    #[test]
+    fn solve_with_progress_skips_callback_on_fresh_cache() {
+        let mut sys = simple_builder().build().unwrap();
+        // Prime the cache.
+        sys.solve().unwrap();
+        let mut fired = 0u32;
+        let _ = sys.solve_with_progress(|_| {
+            fired += 1;
+            SolveControl::Continue
+        });
+        assert_eq!(fired, 0);
+    }
+
+    #[test]
+    fn solve_with_progress_works_on_log_objective() {
+        let opts = SolverOptions {
+            objective: SolverObjective::Log,
+            ..SolverOptions::default()
+        };
+        let mut sys = simple_builder().options(opts).build().unwrap();
+        let mut history: Vec<IterationStatus> = Vec::new();
+        let eq = sys
+            .solve_with_progress(|s| {
+                history.push(*s);
+                SolveControl::Continue
+            })
+            .unwrap();
+        assert_eq!(history.len(), eq.iterations());
+        assert!(!history.is_empty());
     }
 
     #[test]
