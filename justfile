@@ -4,6 +4,10 @@ default:
 
 venv := justfile_directory() / ".venv"
 
+# License check on the runtime dependency tree (cargo-deny)
+deny:
+    cargo deny check licenses
+
 # Rust coverage from Rust tests
 coverage-rust:
     #!/usr/bin/env bash

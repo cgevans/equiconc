@@ -1,0 +1,30 @@
+# cargo-deny configuration.
+#
+# Scope: license enforcement on the runtime dependency tree of the
+# published crate (and, when the `python` / `coffee-cli` features are
+# enabled, the runtime trees of those too). Dev-dependencies — criterion,
+# proptest, the COFFEE git dep used for cross-checks — are excluded:
+# they ship with neither the crates.io tarball nor the PyPI wheel, so
+# their licenses don't constrain downstream users.
+
+[graph]
+# Skip dev-dependencies. Avoids needing to allow Apache-2.0 (nalgebra,
+# criterion bits), BSL-1.0 (ryu via criterion), Zlib/Unlicense quirks,
+# and the no-license-metadata coffee git dep.
+exclude-dev = true
+# Resolve with all optional features so PyO3 and clap (coffee-cli) are
+# included in the check.
+all-features = true
+
+[licenses]
+# Allow-list. Anything not listed fails the check. SPDX expressions are
+# evaluated as a whole, so a crate licensed "MIT OR Apache-2.0" passes
+# if either is allowed.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",  # target-lexicon (build-dep of pyo3)
+    "BSD-3-Clause",                     # equiconc itself
+    "Unicode-3.0",                      # unicode-ident (transitively via syn)
+]
+confidence-threshold = 0.93

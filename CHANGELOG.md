@@ -54,6 +54,11 @@
   agreement on a synthetic 2-monomer/1-dimer system and on all three
   COFFEE testcases (skipped if `../coffee/testcases/` is absent).
   Build with `cargo build --release --features coffee-cli`.
+- `cargo-deny` configuration (`deny.toml`) and a CI job that fails the
+  build if a runtime dependency carries a license outside the allow-list
+  (`MIT`, `Apache-2.0`, `Apache-2.0 WITH LLVM-exception`, `BSD-3-Clause`,
+  `Unicode-3.0`). Dev-dependencies are excluded since they ship in
+  neither the crate tarball nor the wheel.
 
 ### Changed
 
