@@ -97,7 +97,15 @@ jobs:
 
   pages:
     name: Deploy docs (root) + web app (/app/) to GitHub Pages
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    # Auto-deploys on main and tag pushes. workflow_dispatch (any
+    # branch) is allowed as an escape hatch so the Pages plumbing can
+    # be smoke-tested from a feature branch without cutting a release;
+    # whatever ref was dispatched then becomes the live site until the
+    # next main/tag push overwrites it.
+    if: |
+      github.event_name == 'workflow_dispatch'
+      || github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/tags/')
     needs: [web, docs, lint]
     runs-on: ubuntu-latest
     permissions:
