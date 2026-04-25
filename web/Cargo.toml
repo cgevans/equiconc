@@ -1,0 +1,60 @@
+[package]
+name = "equiconc-web"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "BSD-3-Clause"
+
+[[bin]]
+name = "equiconc-web"
+path = "src/main.rs"
+
+[[bin]]
+name = "equiconc-web-worker"
+path = "src/worker_bin.rs"
+
+[lib]
+name = "equiconc_web"
+path = "src/lib.rs"
+
+[dependencies]
+equiconc = { path = ".." }
+leptos = { version = "0.8", features = ["csr"] }
+ndarray = "0.17"
+console_error_panic_hook = "0.1"
+gloo-worker = { version = "0.6", features = ["futures"] }
+send_wrapper = "0.6"
+serde = { version = "1", features = ["derive"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Window",
+    "WorkerGlobalScope",
+    "console",
+    "Document",
+    "Element",
+    "HtmlElement",
+    "HtmlInputElement",
+    "HtmlAnchorElement",
+    "HtmlTextAreaElement",
+    "Blob",
+    "BlobPropertyBag",
+    "Url",
+    "Performance",
+    "Clipboard",
+    "Navigator",
+    "File",
+    "FileList",
+    "FileReader",
+    "DataTransfer",
+    "DragEvent",
+    "Event",
+    "EventTarget",
+] }
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("trunk"))'] }

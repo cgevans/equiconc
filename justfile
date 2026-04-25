@@ -2,12 +2,31 @@
 default:
     @just --list
 
+# Build the static web app to web/dist/
+web:
+    cd web && trunk build --release
+
+# Serve the web app with live reload at http://localhost:8080.
+# Uses --release so dev iterations exercise the same optimized solver
+# the production bundle ships — debug-profile wasm is several × slower
+# on numeric inner loops and gives a misleading sense of UI latency.
+web-dev:
+    cd web && trunk serve --release
+
+# Numeric regression tests for the web crate (native; same Rust code as wasm)
+web-test:
+    cargo test -p equiconc-web --bin equiconc-web
+    cargo test -p equiconc-web --test numeric_regression
+
 venv := justfile_directory() / ".venv"
 
 # Supply-chain checks on the runtime dependency tree (cargo-deny):
-# license allow-list, RustSec advisories, and source registry.
+# license allow-list, RustSec advisories, and source registry. The
+# `--exclude-unpublished` flag drops `equiconc-web` from the graph
+# roots — its Leptos / Trunk dependency tree ships only inside the
+# static website artifact and is reviewed via the `web` CI job.
 deny:
-    cargo deny check licenses advisories sources
+    cargo deny --exclude-unpublished check licenses advisories sources
 
 # Rust coverage from Rust tests
 coverage-rust:

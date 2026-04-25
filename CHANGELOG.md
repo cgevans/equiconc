@@ -4,6 +4,55 @@
 
 ### Added
 
+- `System::solve_with_progress(on_iter)` / `IterationStatus` /
+  `SolveControl` / `EquilibriumError::Aborted`. The new method invokes
+  a callback once per outer trust-region iteration (linear and log
+  paths both); the callback may return `SolveControl::Abort` to
+  short-circuit with `EquilibriumError::Aborted`. The existing
+  `System::solve()` is now a thin shim that supplies a no-op callback,
+  so its behavior and performance are unchanged. Intended as the hook
+  for live progress reporting from the web UI's worker, but useful
+  anywhere a long sweep wants to surface convergence telemetry.
+
+- Browser-side equilibrium-concentration solver as a separate
+  `web/` crate (Leptos + Trunk). Builds to a single static-site
+  bundle (`trunk build --release` → `web/dist/`); no backend, no
+  JS code, all compute runs in WebAssembly via the unmodified
+  `equiconc` solver. The page exposes the full `SolverOptions`
+  surface tiered Basic / Advanced / Expert, includes
+  `equiconc-defaults` and `COFFEE-compatible` preset buttons,
+  drag-and-drop file loading for `.cfe` / `.ocx` / `.con`, baked-in
+  testcases, sortable concentrations table with per-monomer
+  share-of-mass, hand-rolled SVG pie + share-of-mass bar charts,
+  a live convergence chart (log₁₀ ‖∇‖ vs. iteration), and
+  TSV / CSV / JSON-report exports. The solve runs in a dedicated
+  Web Worker so the UI thread stays responsive; a Cancel button
+  terminates the worker mid-iteration. New `just web` and
+  `just web-dev` recipes; new CI job builds and uploads the dist
+  artifact, and `main` / tag pushes deploy to GitHub Pages.
+- `pub mod equiconc::io` with `parse_cfe(text, n_mon)` and
+  `parse_concentrations(text)` parsers for NUPACK-style complex
+  tables (`.cfe` / `.ocx`, with NUPACK header auto-detection) and
+  one-value-per-line concentration files (`.con`). Accepts
+  whitespace, `,`, `;`, and `|` as delimiters.
+- `pub fn equiconc::water_molar_density(t_c)` — molar density of
+  liquid water from the Tanaka 2001 mass-density formula. Useful
+  for converting between molarity and mole fraction in callers
+  that mirror COFFEE's "scalarity" wrapper.
+- `equiconc::Equilibrium::mass_balance_residual` /
+  `mass_balance_residual_self` and a free-function
+  `equiconc::mass_balance_residual` for `max_i |c0_i − Σ_j A_{ji} c_j|`.
+
+### Changed
+
+- `equiconc-coffee-cli` now consumes `equiconc::io::parse_cfe`,
+  `equiconc::io::parse_concentrations`, `equiconc::water_molar_density`,
+  and `equiconc::mass_balance_residual` instead of carrying its own
+  copies. No behavior change.
+- The repository is now a Cargo workspace; the published `equiconc`
+  package is unchanged but the workspace also contains the
+  `equiconc-web` crate (`publish = false`).
+
 - New `simd` Cargo feature (opt-in, off by default) that vectorizes
   the per-species element-wise hot loops in `evaluate_into` and
   `evaluate_log_into` via `pulp` runtime ISA dispatch (SSE2 / AVX2 /

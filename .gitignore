@@ -1,4 +1,5 @@
 /target
+/web/target
 *.so
 *.pyd
 __pycache__/
@@ -13,6 +14,10 @@ site/
 docs/notebooks/*.md
 docs/notebooks/*_files/
 .hypothesis/
+
+# Local agent / tool metadata
+/.claude/
+/.codex
 
 # Local dev notes / writeups not tracked in this repo
 /coffee-bugs.md

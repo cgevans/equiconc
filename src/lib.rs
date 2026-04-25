@@ -106,8 +106,11 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayViewMut1, s};
 use std::collections::HashMap;
 use std::ops::Index;
 
+pub mod io;
 mod simd_kernels;
+mod water;
 use simd_kernels::Kernels;
+pub use water::water_molar_density;
 
 /// Gas constant in kcal/(mol·K).
 pub const R: f64 = 1.987204e-3;
@@ -140,6 +143,10 @@ pub enum EquilibriumError {
     ConvergenceFailure {
         iterations: usize,
         gradient_norm: f64,
+    },
+    /// The progress callback returned [`SolveControl::Abort`].
+    Aborted {
+        iterations: usize,
     },
 }
 
@@ -180,6 +187,12 @@ impl std::fmt::Display for EquilibriumError {
                 f,
                 "did not converge after {iterations} iterations (‖∇‖ = {gradient_norm:.2e})"
             ),
+            Self::Aborted { iterations } => {
+                write!(
+                    f,
+                    "solve aborted by progress callback after {iterations} iterations"
+                )
+            }
         }
     }
 }
@@ -251,6 +264,38 @@ pub enum SolverObjective {
     Linear,
     /// Log-dual `g(λ) = ln f(λ)` (faster on stiff systems; non-convex).
     Log,
+}
+
+/// Snapshot of the solver state passed to a progress callback once per
+/// outer trust-region iteration. See [`System::solve_with_progress`].
+#[derive(Debug, Clone, Copy)]
+pub struct IterationStatus {
+    /// Number of completed outer iterations (1-based — `1` means the
+    /// first iteration just finished evaluating).
+    pub iteration: usize,
+    /// 2-norm of the primal mass-conservation residual `∇f = Ac − c⁰`.
+    /// This is the same gradient the convergence test inspects component-
+    /// wise; the norm is provided for convenient log-scale plotting.
+    pub gradient_norm: f64,
+    /// Current objective value: `f(λ)` for [`SolverObjective::Linear`],
+    /// `g(λ) = ln f(λ)` for [`SolverObjective::Log`].
+    pub objective: f64,
+    /// Current trust-region radius δ. Useful as a coarse health signal:
+    /// δ shrinking quickly suggests rejected steps; δ at `max_trust_region_radius`
+    /// suggests the model is fitting cleanly.
+    pub trust_radius: f64,
+}
+
+/// Return value of a progress callback. Returning [`SolveControl::Abort`]
+/// short-circuits the solve with [`EquilibriumError::Aborted`]; the
+/// system's `lambda` and primal concentrations reflect the last
+/// completed iteration but are not guaranteed to be a valid solution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SolveControl {
+    /// Keep iterating.
+    Continue,
+    /// Stop the solve and return [`EquilibriumError::Aborted`].
+    Abort,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1069,6 +1114,25 @@ impl System {
     /// If `self` is already fresh (no mutation since the last successful
     /// solve), this returns the cached result with no recomputation.
     pub fn solve(&mut self) -> Result<Equilibrium<'_>, EquilibriumError> {
+        self.solve_with_progress(|_| SolveControl::Continue)
+    }
+
+    /// Like [`System::solve`], but invokes `on_iter` once per completed
+    /// outer trust-region iteration. The callback receives an
+    /// [`IterationStatus`] snapshot and may return [`SolveControl::Abort`]
+    /// to short-circuit the solve with [`EquilibriumError::Aborted`].
+    ///
+    /// The callback is *not* invoked on the cached-fresh fast path or
+    /// when the system has no complexes (the closed-form short-circuit).
+    /// In both of those cases the solve completes without any
+    /// trust-region iterations, so there's nothing to report.
+    pub fn solve_with_progress<F>(
+        &mut self,
+        mut on_iter: F,
+    ) -> Result<Equilibrium<'_>, EquilibriumError>
+    where
+        F: FnMut(&IterationStatus) -> SolveControl,
+    {
         if !self.fresh {
             self.options.validate()?;
             validate_inputs(&self.inputs)?;
@@ -1078,6 +1142,7 @@ impl System {
                 &mut self.solution,
                 &self.options,
                 self.kernels,
+                &mut on_iter,
             )?;
             self.fresh = true;
         }
@@ -1321,6 +1386,59 @@ impl<'a> Equilibrium<'a> {
     pub fn at(&self, idx: usize) -> f64 {
         self.sys.solution.concentrations[idx]
     }
+
+    /// Largest absolute per-monomer mass-balance deviation against a
+    /// supplied vector of total monomer concentrations:
+    /// `max_i |c0_i − Σ_j A_{ji} · c_j|`.
+    ///
+    /// Pass the original (pre-scaling) `c0` if you have rescaled
+    /// concentrations out of mole-fraction space; otherwise the
+    /// `System`'s stored `c0` is the natural choice (use
+    /// [`Equilibrium::mass_balance_residual_self`]).
+    #[must_use]
+    pub fn mass_balance_residual(&self, c0: ArrayView1<'_, f64>) -> f64 {
+        mass_balance_residual(self.sys.stoichiometry(), c0, self.concentrations())
+    }
+
+    /// Largest absolute per-monomer mass-balance deviation against the
+    /// system's stored `c0`. Useful as a sanity check when no rescaling
+    /// is applied outside the solver.
+    #[must_use]
+    pub fn mass_balance_residual_self(&self) -> f64 {
+        mass_balance_residual(
+            self.sys.stoichiometry(),
+            self.sys.c0(),
+            self.concentrations(),
+        )
+    }
+}
+
+/// Largest absolute per-monomer mass-balance deviation:
+/// `max_i |c0_i − Σ_j A_{ji} · c_j|`.
+///
+/// `a` is `n_species × n_mon`; `c0` is `n_mon`; `conc` is `n_species`.
+#[must_use]
+pub fn mass_balance_residual(
+    a: ArrayView2<'_, f64>,
+    c0: ArrayView1<'_, f64>,
+    conc: ArrayView1<'_, f64>,
+) -> f64 {
+    let n_mon = c0.len();
+    let n_species = a.nrows();
+    debug_assert_eq!(conc.len(), n_species);
+
+    let mut worst: f64 = 0.0;
+    for i in 0..n_mon {
+        let mut total = 0.0;
+        for j in 0..n_species {
+            total += a[[j, i]] * conc[j];
+        }
+        let diff = (c0[i] - total).abs();
+        if diff > worst {
+            worst = diff;
+        }
+    }
+    worst
 }
 
 impl Index<&str> for Equilibrium<'_> {
@@ -1351,6 +1469,7 @@ fn solve_inputs_into(
     solution: &mut SolutionStorage,
     options: &SolverOptions,
     kernels: Kernels,
+    on_iter: &mut dyn FnMut(&IterationStatus) -> SolveControl,
 ) -> Result<(), EquilibriumError> {
     let n_species = inputs.at.nrows();
     let n_mon = inputs.at.ncols();
@@ -1375,6 +1494,7 @@ fn solve_inputs_into(
         work,
         options,
         kernels,
+        on_iter,
     )?;
 
     // `work.c` holds the concentrations at `solution.lambda` after the
@@ -1940,13 +2060,14 @@ fn solve_dual_into(
     work: &mut WorkBuffers,
     opts: &SolverOptions,
     kernels: Kernels,
+    on_iter: &mut dyn FnMut(&IterationStatus) -> SolveControl,
 ) -> Result<SolverConvergence, EquilibriumError> {
     match opts.objective {
         SolverObjective::Linear => {
-            solve_dual_linear_into(at, at_nz, log_q, c0, lambda, work, opts, kernels)
+            solve_dual_linear_into(at, at_nz, log_q, c0, lambda, work, opts, kernels, on_iter)
         }
         SolverObjective::Log => {
-            solve_dual_log_into(at, at_nz, log_q, c0, lambda, work, opts, kernels)
+            solve_dual_log_into(at, at_nz, log_q, c0, lambda, work, opts, kernels, on_iter)
         }
     }
 }
@@ -1961,6 +2082,7 @@ fn solve_dual_linear_into(
     work: &mut WorkBuffers,
     opts: &SolverOptions,
     kernels: Kernels,
+    on_iter: &mut dyn FnMut(&IterationStatus) -> SolveControl,
 ) -> Result<SolverConvergence, EquilibriumError> {
     let max_iter = opts.max_iterations;
     let atol = opts.gradient_abs_tol;
@@ -2016,6 +2138,18 @@ fn solve_dual_linear_into(
         if trace {
             let g_inf = grad.iter().map(|g: &f64| g.abs()).fold(0.0_f64, f64::max);
             eprintln!("{iter}\t{f:.15e}\t{g_inf:.6e}\t{delta:.3e}\t{stagnation}");
+        }
+
+        let status = IterationStatus {
+            iteration: iter + 1,
+            gradient_norm: norm(grad),
+            objective: f,
+            trust_radius: delta,
+        };
+        if on_iter(&status) == SolveControl::Abort {
+            return Err(EquilibriumError::Aborted {
+                iterations: iter + 1,
+            });
         }
 
         if grad
@@ -2194,6 +2328,7 @@ fn solve_dual_log_into(
     work: &mut WorkBuffers,
     opts: &SolverOptions,
     kernels: Kernels,
+    on_iter: &mut dyn FnMut(&IterationStatus) -> SolveControl,
 ) -> Result<SolverConvergence, EquilibriumError> {
     let max_iter = opts.max_iterations;
     let atol = opts.gradient_abs_tol;
@@ -2301,6 +2436,18 @@ fn solve_dual_log_into(
         if trace {
             let g_inf = grad.iter().map(|gv: &f64| gv.abs()).fold(0.0_f64, f64::max);
             eprintln!("{iter}\t{g:.15e}\t{f:.6e}\t{g_inf:.6e}\t{delta:.3e}\t-\t{stagnation}");
+        }
+
+        let status = IterationStatus {
+            iteration: iter + 1,
+            gradient_norm: norm(grad),
+            objective: g,
+            trust_radius: delta,
+        };
+        if on_iter(&status) == SolveControl::Abort {
+            return Err(EquilibriumError::Aborted {
+                iterations: iter + 1,
+            });
         }
 
         // Convergence test on the *primal residual* — same criterion as
@@ -2493,6 +2640,100 @@ mod tests {
             .monomer("A", 100.0 * NM)
             .monomer("B", 100.0 * NM)
             .complex("AB", &[("A", 1), ("B", 1)], -10.0)
+    }
+
+    #[test]
+    fn solve_with_progress_fires_each_iteration_and_records_iteration_count() {
+        let mut sys = simple_builder().build().unwrap();
+        let mut history: Vec<IterationStatus> = Vec::new();
+        let eq = sys
+            .solve_with_progress(|s| {
+                history.push(*s);
+                SolveControl::Continue
+            })
+            .unwrap();
+        let reported = eq.iterations();
+        assert_eq!(history.len(), reported);
+        // Iteration counts are 1-based and contiguous.
+        for (i, status) in history.iter().enumerate() {
+            assert_eq!(status.iteration, i + 1);
+            assert!(status.gradient_norm.is_finite());
+            assert!(status.objective.is_finite());
+            assert!(status.trust_radius > 0.0);
+        }
+        // Gradient norm should be monotonically non-increasing on this
+        // benign convex problem (modulo trust-region wobble at the very
+        // start). We only assert the last is below the first.
+        if let (Some(first), Some(last)) = (history.first(), history.last()) {
+            assert!(last.gradient_norm < first.gradient_norm);
+        }
+    }
+
+    #[test]
+    fn solve_with_progress_abort_returns_aborted_error() {
+        let mut sys = simple_builder().build().unwrap();
+        let err = sys
+            .solve_with_progress(|s| {
+                if s.iteration >= 2 {
+                    SolveControl::Abort
+                } else {
+                    SolveControl::Continue
+                }
+            })
+            .unwrap_err();
+        match err {
+            EquilibriumError::Aborted { iterations } => assert_eq!(iterations, 2),
+            other => panic!("expected Aborted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn solve_with_progress_skips_callback_on_no_complexes_short_circuit() {
+        let mut sys = SystemBuilder::new()
+            .monomer("A", 50e-9)
+            .monomer("B", 100e-9)
+            .build()
+            .unwrap();
+        let mut fired = 0u32;
+        let eq = sys
+            .solve_with_progress(|_| {
+                fired += 1;
+                SolveControl::Continue
+            })
+            .unwrap();
+        assert_eq!(fired, 0);
+        assert_eq!(eq.iterations(), 0);
+    }
+
+    #[test]
+    fn solve_with_progress_skips_callback_on_fresh_cache() {
+        let mut sys = simple_builder().build().unwrap();
+        // Prime the cache.
+        sys.solve().unwrap();
+        let mut fired = 0u32;
+        let _ = sys.solve_with_progress(|_| {
+            fired += 1;
+            SolveControl::Continue
+        });
+        assert_eq!(fired, 0);
+    }
+
+    #[test]
+    fn solve_with_progress_works_on_log_objective() {
+        let opts = SolverOptions {
+            objective: SolverObjective::Log,
+            ..SolverOptions::default()
+        };
+        let mut sys = simple_builder().options(opts).build().unwrap();
+        let mut history: Vec<IterationStatus> = Vec::new();
+        let eq = sys
+            .solve_with_progress(|s| {
+                history.push(*s);
+                SolveControl::Continue
+            })
+            .unwrap();
+        assert_eq!(history.len(), eq.iterations());
+        assert!(!history.is_empty());
     }
 
     #[test]
