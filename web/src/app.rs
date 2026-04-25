@@ -87,7 +87,6 @@ pub fn App() -> impl IntoView {
         <main>
             <header>
                 <h1>"equiconc"</h1>
-                <span class="tag">"equilibrium concentrations, in your browser"</span>
             </header>
 
             <InputPanels cfe_text=cfe_text con_text=con_text />
@@ -138,11 +137,6 @@ pub fn App() -> impl IntoView {
                 }}
             </div>
 
-            <ConvergenceChart
-                progress_trace=progress_trace
-                final_iteration=final_iteration
-            />
-
             <OutputPanels
                 result=result
                 error=error
@@ -150,10 +144,18 @@ pub fn App() -> impl IntoView {
                 con_text=con_text
             />
 
+            // Convergence chart sits last so it's the only post-solve-bar
+            // element while the worker is still running (no result yet);
+            // once `OutputPanels` materializes, this falls below the
+            // results table where it serves as historical context rather
+            // than the main visualization.
+            <ConvergenceChart
+                progress_trace=progress_trace
+                final_iteration=final_iteration
+            />
+
             <footer>
-                "Solve runs entirely in this tab via Rust + WebAssembly in a Web Worker — "
-                "the UI thread stays responsive while the solver iterates. "
-                "No data is uploaded. "
+                "Solve runs entirely in this tab. No data is uploaded. "
                 <a href="https://github.com/cgevans/equiconc" target="_blank" rel="noopener">
                     "Source on GitHub"
                 </a>

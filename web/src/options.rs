@@ -71,7 +71,7 @@ fn BasicOptions(options: RwSignal<UiOptions>) -> impl IntoView {
                         EnergyUnit::RT => "RT",
                     }.to_string()
                 >
-                    <option value="kcal/mol">"kcal/mol (NUPACK convention)"</option>
+                    <option value="kcal/mol">"kcal/mol"</option>
                     <option value="RT">"RT units (dimensionless ΔG/RT)"</option>
                 </select>
             </label>

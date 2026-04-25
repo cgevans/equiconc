@@ -3,20 +3,18 @@
 //! integration.
 
 use leptos::prelude::*;
-use std::f64::consts::TAU;
 
 use crate::state::SolveResult;
 use crate::wire::ProgressMsg;
 
-/// Top-N concentrations rendered as a pie chart, with the remaining
-/// species lumped into an "other" wedge. `n` includes the "other"
-/// bucket — pass `n = 6` for top-5-plus-other.
+/// Top-N species by absolute concentration as horizontal bars. Bars
+/// are scaled to the largest species' concentration; the value is
+/// printed at the right of each bar in scientific notation.
 #[component]
-pub fn ConcentrationsPie(result: Signal<Option<SolveResult>>) -> impl IntoView {
+pub fn ConcentrationsBars(result: Signal<Option<SolveResult>>) -> impl IntoView {
     move || {
         let res = result.get()?;
-        let total: f64 = res.concentrations.iter().sum();
-        if total <= 0.0 || !total.is_finite() {
+        if res.concentrations.is_empty() {
             return None;
         }
 
@@ -25,72 +23,86 @@ pub fn ConcentrationsPie(result: Signal<Option<SolveResult>>) -> impl IntoView {
             .iter()
             .enumerate()
             .map(|(i, c)| (i, *c))
+            .filter(|(_, c)| c.is_finite() && *c > 0.0)
             .collect();
+        if indexed.is_empty() {
+            return None;
+        }
         indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        let top_n = 5;
-        let mut wedges: Vec<(String, f64)> = Vec::new();
-        let mut other = 0.0;
-        for (rank, (idx, c)) in indexed.iter().enumerate() {
-            if rank < top_n {
+        let top_n = 8usize.min(indexed.len());
+        let bars: Vec<(String, f64)> = indexed
+            .iter()
+            .take(top_n)
+            .map(|(idx, c)| {
                 let label = if *idx < res.n_mon {
-                    format!("M{idx}")
+                    format!("M{}", idx + 1)
                 } else {
-                    format!("S{idx}")
+                    format!("S{}", idx + 1)
                 };
-                wedges.push((label, *c));
-            } else {
-                other += *c;
-            }
-        }
-        if other > 0.0 {
-            wedges.push(("other".into(), other));
-        }
+                (label, *c)
+            })
+            .collect();
 
-        let cx = 110.0_f64;
-        let cy = 110.0_f64;
-        let r = 100.0_f64;
-        let mut path_views = Vec::new();
-        let mut legend_views = Vec::new();
-        let mut start = -TAU / 4.0; // 12 o'clock
-        for (i, (label, c)) in wedges.iter().enumerate() {
-            let frac = c / total;
-            let end = start + frac * TAU;
-            let large_arc = if frac > 0.5 { 1 } else { 0 };
-            let x1 = cx + r * start.cos();
-            let y1 = cy + r * start.sin();
-            let x2 = cx + r * end.cos();
-            let y2 = cy + r * end.sin();
-            let d = format!(
-                "M {cx},{cy} L {x1:.2},{y1:.2} A {r},{r} 0 {large_arc} 1 {x2:.2},{y2:.2} Z"
-            );
-            let color = palette(i);
-            path_views
-                .push(view! { <path d=d fill=color stroke="var(--bg-panel)" stroke-width="1" /> });
+        let max_c = bars.first().map(|(_, c)| *c).unwrap_or(1.0);
 
-            let pct = frac * 100.0;
-            legend_views.push(view! {
-                <li>
-                    <span style=format!("display:inline-block;width:0.7em;height:0.7em;background:{};margin-right:0.3em;border-radius:2px;", color)></span>
-                    {label.clone()}
-                    " — "
-                    {format!("{pct:.1}%")}
-                </li>
-            });
-            start = end;
-        }
+        let label_w = 44.0_f64;
+        let value_w = 86.0_f64;
+        let bar_area_w = 220.0_f64;
+        let row_h = 22.0_f64;
+        let total_w = label_w + bar_area_w + value_w;
+        let total_h = row_h * bars.len() as f64;
+
+        let rows = bars
+            .iter()
+            .enumerate()
+            .map(|(i, (label, c))| {
+                let y = (i as f64) * row_h;
+                let bar_h = row_h * 0.65;
+                let bar_y = y + (row_h - bar_h) / 2.0;
+                let w = (c / max_c) * bar_area_w;
+                let color = palette(i);
+                let value = format!("{c:.3e} M");
+                view! {
+                    <text
+                        x=format!("{:.2}", label_w - 6.0)
+                        y=format!("{:.2}", y + row_h * 0.68)
+                        text-anchor="end"
+                        font-size="11"
+                        fill="var(--fg)"
+                    >
+                        {label.clone()}
+                    </text>
+                    <rect
+                        x=format!("{label_w:.2}")
+                        y=format!("{bar_y:.2}")
+                        width=format!("{:.2}", w.max(0.0))
+                        height=format!("{bar_h:.2}")
+                        fill=color
+                    />
+                    <text
+                        x=format!("{:.2}", label_w + bar_area_w + 6.0)
+                        y=format!("{:.2}", y + row_h * 0.68)
+                        text-anchor="start"
+                        font-size="11"
+                        fill="var(--fg-muted)"
+                        font-family="var(--mono)"
+                    >
+                        {value}
+                    </text>
+                }
+            })
+            .collect::<Vec<_>>();
 
         Some(view! {
             <div class="chart">
-                <h3 style="margin:0 0 0.5rem; font-size:0.95rem;">"Top species (by concentration)"</h3>
-                <div style="display:flex; align-items:flex-start; gap:0.75rem;">
-                    <svg viewBox="0 0 220 220" style="width:220px; height:220px; flex-shrink:0;">
-                        {path_views}
-                    </svg>
-                    <ul style="list-style:none; padding:0; margin:0; font-size:0.85rem;">
-                        {legend_views}
-                    </ul>
-                </div>
+                <h3 style="margin:0 0 0.5rem; font-size:0.95rem;">"Top species (absolute concentration)"</h3>
+                <svg
+                    viewBox=format!("0 0 {total_w:.2} {total_h:.2}")
+                    style="width:100%; height:auto;"
+                >
+                    {rows}
+                </svg>
             </div>
         })
     }
@@ -131,9 +143,9 @@ pub fn MassShareBars(result: Signal<Option<SolveResult>>) -> impl IntoView {
                 let h = s * plot_h;
                 let color = palette(rank);
                 let label = if *j < res.n_mon {
-                    format!("M{j}")
+                    format!("M{}", j + 1)
                 } else {
-                    format!("S{j}")
+                    format!("S{}", j + 1)
                 };
                 let pct = s * 100.0;
                 let title = format!("{label}: {pct:.1}%");
@@ -160,7 +172,7 @@ pub fn MassShareBars(result: Signal<Option<SolveResult>>) -> impl IntoView {
                     font-size="11"
                     fill="var(--fg)"
                 >
-                    {format!("M{i}")}
+                    {format!("M{}", i + 1)}
                 </text>
             });
         }
@@ -207,12 +219,14 @@ pub fn ConvergenceChart(
         }
 
         // Plot area in user-space units; outer SVG scales to fit.
-        let pad_left = 44.0_f64;
-        let pad_right = 12.0_f64;
-        let pad_top = 18.0_f64;
-        let pad_bottom = 28.0_f64;
-        let plot_w = 360.0_f64;
-        let plot_h = 160.0_f64;
+        // Sizing kept compact: this chart is most useful as a
+        // glance-during-solve indicator, not a hero visualization.
+        let pad_left = 36.0_f64;
+        let pad_right = 8.0_f64;
+        let pad_top = 12.0_f64;
+        let pad_bottom = 22.0_f64;
+        let plot_w = 240.0_f64;
+        let plot_h = 90.0_f64;
         let total_w = pad_left + plot_w + pad_right;
         let total_h = pad_top + plot_h + pad_bottom;
 
@@ -264,11 +278,11 @@ pub fn ConvergenceChart(
         let x_axis_label = format!("{}", trace.len());
 
         Some(view! {
-            <div class="chart">
-                <h3 style="margin:0 0 0.5rem; font-size:0.95rem;">"Convergence (log₁₀ ‖∇‖ vs. iteration)"</h3>
+            <div class="chart convergence-chart">
+                <h3 style="margin:0 0 0.4rem; font-size:0.85rem;">"Convergence (log₁₀ ‖∇‖ vs. iteration)"</h3>
                 <svg
                     viewBox=format!("0 0 {total_w:.2} {total_h:.2}")
-                    style="width:100%; height:auto;"
+                    style="width:100%; max-width:340px; height:auto;"
                 >
                     // Plot frame
                     <rect

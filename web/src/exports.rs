@@ -8,10 +8,10 @@ use crate::state::SolveResult;
 /// Render the per-species table as TSV with a header row.
 ///
 /// Columns: `index, name, ΔG_kcal_mol, c_M, ` then one column per
-/// monomer-share-of-mass (`share_M0`, `share_M1`, …). `name` is
-/// `M{i}` for monomers and `S{i}` for species; we don't have user
-/// names in this front end yet (the `parse_cfe` path doesn't carry
-/// them).
+/// monomer-share-of-mass (`share_M1`, `share_M2`, …). `name` is
+/// `M{i}` for monomers and `S{i}` for species, indexed from 1 to
+/// match the .ocx file layout. We don't have user names in this
+/// front end yet (the `parse_cfe` path doesn't carry them).
 pub fn results_tsv(result: &SolveResult) -> String {
     render(result, '\t')
 }
@@ -35,18 +35,18 @@ fn render(result: &SolveResult, sep: char) -> String {
     s.push_str("concentration_M");
     for i in 0..n_mon {
         s.push(sep);
-        s.push_str(&format!("share_M{i}"));
+        s.push_str(&format!("share_M{}", i + 1));
     }
     s.push('\n');
 
     let shares: Vec<_> = (0..n_mon).map(|i| result.share_of_monomer(i)).collect();
     for j in 0..n_species {
         let name = if j < n_mon {
-            format!("M{j}")
+            format!("M{}", j + 1)
         } else {
-            format!("S{j}")
+            format!("S{}", j + 1)
         };
-        s.push_str(&j.to_string());
+        s.push_str(&(j + 1).to_string());
         s.push(sep);
         s.push_str(&name);
         s.push(sep);

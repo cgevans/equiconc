@@ -5,7 +5,7 @@ use leptos::prelude::*;
 use leptos::wasm_bindgen::JsCast;
 use leptos::web_sys;
 
-use crate::charts::{ConcentrationsPie, MassShareBars};
+use crate::charts::{ConcentrationsBars, MassShareBars};
 use crate::exports::{report_json, results_csv, results_tsv};
 use crate::state::{SolveError, SolveResult};
 
@@ -14,6 +14,12 @@ pub enum SortBy {
     Concentration,
     Index,
 }
+
+/// Above this many species, the table renders only the leading rows
+/// (in current sort order) and exposes a "Show all" toggle. Picked to
+/// keep the DOM responsive on COFFEE-style 50k-species systems without
+/// hiding anything useful on the typical small testcases.
+const TABLE_PAGINATION_LIMIT: usize = 100;
 
 #[component]
 pub fn OutputPanels(
@@ -24,6 +30,7 @@ pub fn OutputPanels(
 ) -> impl IntoView {
     let (sort_by, set_sort_by) = signal(SortBy::Concentration);
     let (descending, set_descending) = signal(true);
+    let (show_all, set_show_all) = signal(false);
 
     let toggle_sort = move |key: SortBy| {
         if sort_by.get() == key {
@@ -45,9 +52,22 @@ pub fn OutputPanels(
             let order = sorted_order(&res, sort_by.get(), descending.get());
             let monomer_totals = res.mass_per_monomer();
             let shares: Vec<_> = (0..res.n_mon).map(|i| res.share_of_monomer(i)).collect();
+            let n_species = res.concentrations.len();
+            let truncated = !show_all.get() && n_species > TABLE_PAGINATION_LIMIT;
+            let visible_count = if truncated {
+                TABLE_PAGINATION_LIMIT
+            } else {
+                n_species
+            };
             view! {
                 <Diagnostics result=res.clone() />
                 <ExportRow result=res.clone() cfe_text=cfe_text con_text=con_text />
+
+                <div class="chart-row">
+                    <ConcentrationsBars result=result />
+                    <MassShareBars result=result />
+                </div>
+
                 <table class="results">
                     <thead>
                         <tr>
@@ -58,14 +78,18 @@ pub fn OutputPanels(
                                 "[c] (M)"
                             </th>
                             {(0..res.n_mon).map(|i| view! {
-                                <th class="num">{format!("share M{i}")}</th>
+                                <th class="num">{format!("share M{}", i + 1)}</th>
                             }).collect::<Vec<_>>()}
                         </tr>
                     </thead>
                     <tbody>
-                        {order.iter().map(|&j| {
+                        {order.iter().take(visible_count).map(|&j| {
                             let is_mon = j < res.n_mon;
-                            let name = if is_mon { format!("M{j}") } else { format!("S{j}") };
+                            let name = if is_mon {
+                                format!("M{}", j + 1)
+                            } else {
+                                format!("S{}", j + 1)
+                            };
                             let row_shares = (0..res.n_mon).map(|i| {
                                 let s = shares[i][j];
                                 view! {
@@ -74,7 +98,7 @@ pub fn OutputPanels(
                             }).collect::<Vec<_>>();
                             view! {
                                 <tr class:monomer=is_mon>
-                                    <td class="num">{j.to_string()}</td>
+                                    <td class="num">{(j + 1).to_string()}</td>
                                     <td class="name">{name}</td>
                                     <td class="num">{format!("{:.3}", res.dg_kcal_used[j])}</td>
                                     <td class="num">{format!("{:.3e}", res.concentrations[j])}</td>
@@ -98,10 +122,28 @@ pub fn OutputPanels(
                     </tfoot>
                 </table>
 
-                <div class="chart-row">
-                    <ConcentrationsPie result=result />
-                    <MassShareBars result=result />
-                </div>
+                {(n_species > TABLE_PAGINATION_LIMIT).then(|| view! {
+                    <div class="table-pagination">
+                        {if show_all.get() {
+                            format!("Showing all {n_species} species.")
+                        } else {
+                            format!(
+                                "Showing top {TABLE_PAGINATION_LIMIT} of {n_species} species \
+                                 (in current sort order)."
+                            )
+                        }}
+                        <button
+                            class="link-button"
+                            on:click=move |_| set_show_all.update(|v| *v = !*v)
+                        >
+                            {move || if show_all.get() {
+                                format!("Show top {TABLE_PAGINATION_LIMIT}")
+                            } else {
+                                format!("Show all {n_species}")
+                            }}
+                        </button>
+                    </div>
+                })}
             }
         })}
     }

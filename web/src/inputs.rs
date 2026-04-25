@@ -20,14 +20,14 @@ pub fn InputPanels(cfe_text: RwSignal<String>, con_text: RwSignal<String>) -> im
         <div class="panels">
             <TextPanel
                 title="Composition (.cfe / .ocx)"
-                hint="One row per species: stoichiometry columns then ΔG (kcal/mol). NUPACK bookkeeping columns auto-detected."
+                hint="One row per species: stoichiometry columns then ΔG. NUPACK bookkeeping columns auto-detected."
                 signal=cfe_text
                 accept=".cfe,.ocx,.txt,.csv,.tsv"
                 rows=14
             />
             <TextPanel
                 title="Concentrations (.con)"
-                hint="One total monomer concentration per line, in molar units (e.g. 1e-6)."
+                hint="One total monomer concentration per line, in molar units (e.g. 1e-6 for 1 µM)."
                 signal=con_text
                 accept=".con,.txt,.csv,.tsv"
                 rows=14
