@@ -1,0 +1,244 @@
+name: Builds
+
+# Linux CI on Codeberg Forgejo Actions. The GitHub workflow still
+# owns the release pipeline (wheel builds for all platforms, sdist,
+# PyPI / GitHub Releases, crates.io); this side runs the Linux-only
+# lint / test / build checks on every push and PR, and deploys docs
+# + the web app to Codeberg Pages on main / tag pushes.
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - '*'
+    paths-ignore:
+      - CHANGELOG.md
+      - README.md
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same PR. Tag/main pushes have unique
+# refs and aren't affected.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    name: Lint (fmt + clippy + rustdoc)
+    runs-on: docker
+    container:
+      image: code.forgejo.org/oci/node:22-bookworm
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+      - name: cargo clippy --no-default-features (scalar path stays alive)
+        run: cargo clippy --workspace --no-default-features --all-targets -- -D warnings
+      - name: cargo doc (deny warnings)
+        run: cargo doc --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+  cargo-deny:
+    name: cargo-deny (licenses, advisories, sources)
+    runs-on: docker
+    container:
+      image: code.forgejo.org/oci/node:22-bookworm
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses advisories sources
+
+  web:
+    name: Web (wasm build + native tests)
+    runs-on: docker
+    container:
+      image: code.forgejo.org/oci/node:22-bookworm
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install trunk
+        uses: jetli/trunk-action@v0.5.0
+        with:
+          version: latest
+      - name: cargo test (web crate, native)
+        run: cargo test -p equiconc-web
+      - name: trunk build --release
+        working-directory: web
+        run: trunk build --release
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist/
+          retention-days: 7
+
+  docs:
+    name: Docs (zensical build with executed notebooks)
+    runs-on: docker
+    container:
+      image: code.forgejo.org/oci/node:22-bookworm
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v7
+      - uses: extractions/setup-just@v4
+      - run: uv sync --group docs
+      - run: just docs
+      - name: Upload docs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-site
+          path: site/
+          retention-days: 7
+
+  tests:
+    runs-on: docker
+    container:
+      image: code.forgejo.org/oci/node:22-bookworm
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov
+      - uses: extractions/setup-just@v4
+
+      - run: uv sync --dev --no-install-project # special version will be installed by coverage-lcov
+      - run: just coverage-python-full
+      - run: just coverage-rust
+      # Coverage upload to Coveralls is disabled until a manual-service
+      # repo is wired up there (Coveralls has no native Codeberg
+      # integration). Coverage files are still produced so re-enabling
+      # is a one-step change.
+
+  # Lightweight cross-Python smoke tests. The `tests` job above is the
+  # source of truth (with coverage) on Linux+3.12; this job covers the
+  # matrix corners that ship in the PyPI wheel but are never otherwise
+  # exercised: the minimum supported Python (3.10) and the free-threaded
+  # interpreter (3.13t). macOS / Windows are validated only at release
+  # time via the wheel-build jobs in the GitHub workflow.
+  tests-matrix:
+    name: Tests (${{ matrix.label }})
+    runs-on: docker
+    container:
+      image: code.forgejo.org/oci/node:22-bookworm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-py3.10
+            python-version: "3.10"
+            maturin-extra: ""
+            cargo-test-extra: ""
+          - label: linux-py3.13t
+            python-version: "3.13t"
+            # abi3-py310 doesn't apply on free-threaded; opt out of the
+            # crate default features and turn on `python` explicitly,
+            # matching the free-threaded wheel build.
+            maturin-extra: "--no-default-features --features python"
+            cargo-test-extra: ""
+          - label: linux-py3.12-simd
+            python-version: "3.12"
+            # Smoke test the opt-in `simd` feature end-to-end so a
+            # regression in the SIMD path is caught here rather than at
+            # release. (lint already runs `cargo clippy --all-features`,
+            # but that's compile-only.)
+            #
+            # `python` has to come along explicitly: the crate's default
+            # features are empty (the SIMD-opt-in flip set them to `[]`),
+            # so without it maturin sees no PyO3 bindings and falls back
+            # to cffi, which then fails because the uv venv has no pip.
+            maturin-extra: "--features simd,python"
+            cargo-test-extra: "--features simd"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: cargo test (lib)
+        run: cargo test --lib ${{ matrix.cargo-test-extra }}
+      - run: uv sync --dev --no-install-project
+      - name: Build extension
+        run: uv run maturin develop --uv --release ${{ matrix.maturin-extra }}
+      - name: pytest
+        run: uv run pytest tests/test_equiconc.py -v
+
+  pages:
+    name: Deploy docs (root) + web app (/app/) to Codeberg Pages
+    # Auto-deploys on main and tag pushes. workflow_dispatch (any
+    # branch) is allowed as an escape hatch so the Pages plumbing can
+    # be smoke-tested from a feature branch without cutting a release;
+    # whatever ref was dispatched then becomes the live site until the
+    # next main/tag push overwrites it.
+    if: |
+      github.event_name == 'workflow_dispatch'
+      || github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/tags/')
+    needs: [web, docs, lint]
+    runs-on: docker
+    container:
+      image: code.forgejo.org/oci/node:22-bookworm
+    permissions:
+      contents: write
+    steps:
+      - name: Download docs site
+        uses: actions/download-artifact@v4
+        with:
+          name: docs-site
+          path: dist
+      - name: Download web app dist
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: dist/app
+      # Codeberg Pages serves whatever sits on the `pages` branch of
+      # the repo at https://<user>.codeberg.page/<repo>/. We commit
+      # the combined dist tree there as a single orphan commit so the
+      # branch never accumulates history. Auth uses the auto-provided
+      # workflow token (writable because of the job-level `contents:
+      # write` permission above).
+      - name: Push dist to pages branch
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          cd dist
+          git init -q -b pages
+          git config user.email "ci@codeberg.org"
+          git config user.name "Codeberg CI"
+          git add -A
+          git commit -q -m "Deploy ${GITHUB_SHA} from ${GITHUB_REF}"
+          server="${GITHUB_SERVER_URL#https://}"
+          git push -f "https://x-access-token:${TOKEN}@${server}/${GITHUB_REPOSITORY}.git" pages
