@@ -80,7 +80,7 @@ jobs:
         working-directory: web
         run: trunk build --release
       - name: Upload dist artifact
-        uses: https://github.com/actions/upload-artifact@v4
+        uses: https://github.com/actions/upload-artifact@v3
         with:
           name: web-dist
           path: web/dist/
@@ -103,7 +103,7 @@ jobs:
       - run: uv sync --group docs
       - run: just docs
       - name: Upload docs artifact
-        uses: https://github.com/actions/upload-artifact@v4
+        uses: https://github.com/actions/upload-artifact@v3
         with:
           name: docs-site
           path: site/
@@ -214,12 +214,12 @@ jobs:
       contents: write
     steps:
       - name: Download docs site
-        uses: https://github.com/actions/download-artifact@v4
+        uses: https://github.com/actions/download-artifact@v3
         with:
           name: docs-site
           path: dist
       - name: Download web app dist
-        uses: https://github.com/actions/download-artifact@v4
+        uses: https://github.com/actions/download-artifact@v3
         with:
           name: web-dist
           path: dist/app
