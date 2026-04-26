@@ -1,7 +1,3 @@
-> **This repository is a mirror.** Primary development happens at
-> [codeberg.org/cge/equiconc](https://codeberg.org/cge/equiconc) —
-> please file issues and pull requests there.
-
 [![Documentation](https://img.shields.io/badge/docs-cge.codeberg.page%2Fequiconc-blue)](https://cge.codeberg.page/equiconc/)
 
 Equiconc is an equilibrium concentration solver for monomer/complex systems (like networks of interactions of DNA/RNA strands),
