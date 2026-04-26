@@ -100,7 +100,15 @@ jobs:
       - uses: https://github.com/astral-sh/setup-uv@v7
         with:
           python-version: "3.12"
-      - uses: https://github.com/extractions/setup-just@v4
+      # Direct install: extractions/setup-just internally references
+      # extractions/setup-crate without a URL prefix, which the runner
+      # then resolves against data.forgejo.org and fails to find.
+      - name: Install just
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
+            | bash -s -- --to "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: uv sync --group docs
       - run: just docs
       - name: Upload docs artifact
@@ -129,7 +137,15 @@ jobs:
           python-version: "3.12"
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov
-      - uses: https://github.com/extractions/setup-just@v4
+      # Direct install: extractions/setup-just internally references
+      # extractions/setup-crate without a URL prefix, which the runner
+      # then resolves against data.forgejo.org and fails to find.
+      - name: Install just
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
+            | bash -s -- --to "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - run: uv sync --dev --no-install-project # special version will be installed by coverage-lcov
       - run: just coverage-python-full
