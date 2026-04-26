@@ -159,11 +159,12 @@ jobs:
           files: coverage-rust-from-python.lcov coverage-python.xml coverage-rust.lcov
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-  # Lightweight cross-platform / cross-Python smoke tests. The `tests`
-  # job above is the source of truth (with coverage) on Linux+3.12; this
-  # job covers the matrix corners that ship in the PyPI wheel but are
-  # never otherwise exercised: the minimum supported Python (3.10), the
-  # free-threaded interpreter (3.13t), and macOS / Windows.
+  # Lightweight cross-Python smoke tests. The `tests` job above is the
+  # source of truth (with coverage) on Linux+3.12; this job covers the
+  # matrix corners that ship in the PyPI wheel but are never otherwise
+  # exercised: the minimum supported Python (3.10) and the free-threaded
+  # interpreter (3.13t). macOS / Windows are validated only at release
+  # time via the wheel-build jobs below.
   tests-matrix:
     name: Tests (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
@@ -198,16 +199,6 @@ jobs:
             # to cffi, which then fails because the uv venv has no pip.
             maturin-extra: "--features simd,python"
             cargo-test-extra: "--features simd"
-          - label: macos-py3.12
-            os: macos-latest
-            python-version: "3.12"
-            maturin-extra: ""
-            cargo-test-extra: ""
-          - label: windows-py3.12
-            os: windows-latest
-            python-version: "3.12"
-            maturin-extra: ""
-            cargo-test-extra: ""
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
