@@ -34,11 +34,11 @@ jobs:
     container:
       image: code.forgejo.org/oci/node:22-bookworm
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: https://github.com/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-features --all-targets -- -D warnings
       - name: cargo clippy --no-default-features (scalar path stays alive)
@@ -54,8 +54,8 @@ jobs:
     container:
       image: code.forgejo.org/oci/node:22-bookworm
     steps:
-      - uses: actions/checkout@v6
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: https://github.com/actions/checkout@v6
+      - uses: https://github.com/EmbarkStudios/cargo-deny-action@v2
         with:
           command: check licenses advisories sources
 
@@ -65,13 +65,13 @@ jobs:
     container:
       image: code.forgejo.org/oci/node:22-bookworm
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: https://github.com/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2
       - name: Install trunk
-        uses: jetli/trunk-action@v0.5.0
+        uses: https://github.com/jetli/trunk-action@v0.5.0
         with:
           version: latest
       - name: cargo test (web crate, native)
@@ -80,7 +80,7 @@ jobs:
         working-directory: web
         run: trunk build --release
       - name: Upload dist artifact
-        uses: actions/upload-artifact@v4
+        uses: https://github.com/actions/upload-artifact@v4
         with:
           name: web-dist
           path: web/dist/
@@ -92,18 +92,18 @@ jobs:
     container:
       image: code.forgejo.org/oci/node:22-bookworm
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v6
+      - uses: https://github.com/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v7
-      - uses: extractions/setup-just@v4
+      - uses: https://github.com/astral-sh/setup-uv@v7
+      - uses: https://github.com/extractions/setup-just@v4
       - run: uv sync --group docs
       - run: just docs
       - name: Upload docs artifact
-        uses: actions/upload-artifact@v4
+        uses: https://github.com/actions/upload-artifact@v4
         with:
           name: docs-site
           path: site/
@@ -114,21 +114,21 @@ jobs:
     container:
       image: code.forgejo.org/oci/node:22-bookworm
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: https://github.com/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools
-      - uses: actions/setup-python@v6
+      - uses: https://github.com/actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Set up Rust cache
-        uses: Swatinem/rust-cache@v2
-      - uses: astral-sh/setup-uv@v7
+        uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/astral-sh/setup-uv@v7
         with:
           enable-cache: true
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov
-      - uses: extractions/setup-just@v4
+      - uses: https://github.com/extractions/setup-just@v4
 
       - run: uv sync --dev --no-install-project # special version will be installed by coverage-lcov
       - run: just coverage-python-full
@@ -178,13 +178,13 @@ jobs:
             maturin-extra: "--features simd,python"
             cargo-test-extra: "--features simd"
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v6
+      - uses: https://github.com/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - uses: https://github.com/actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
-      - uses: Swatinem/rust-cache@v2
-      - uses: astral-sh/setup-uv@v7
+      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/astral-sh/setup-uv@v7
         with:
           enable-cache: true
       - name: cargo test (lib)
@@ -214,12 +214,12 @@ jobs:
       contents: write
     steps:
       - name: Download docs site
-        uses: actions/download-artifact@v4
+        uses: https://github.com/actions/download-artifact@v4
         with:
           name: docs-site
           path: dist
       - name: Download web app dist
-        uses: actions/download-artifact@v4
+        uses: https://github.com/actions/download-artifact@v4
         with:
           name: web-dist
           path: dist/app
