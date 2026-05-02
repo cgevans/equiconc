@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Releases (PyPI, crates.io, plus a Forgejo release with all wheels
+  attached) are now produced from Codeberg via
+  `.forgejo/workflows/builds.yml`. The GitHub workflow at
+  `.github/workflows/builds.yml` is reduced to a CI mirror that runs
+  Linux lint + Python smoke tests on push/PR. The Codeberg Generic
+  Packages registry is intentionally not used as a release mirror, and
+  CI artifact retention is kept short (1 day for wheels/sdist, 3 days
+  for the docs/web bundles), to stay under Codeberg's 1.5 GB per-repo
+  storage quota.
+- PyPI publication switched from `--trusted-publishing always` (no
+  Codeberg/Forgejo OIDC support yet) to a `PYPI_TOKEN` API token.
+
+### Removed
+
+- macOS `x86_64` wheels are no longer produced. Apple Silicon
+  (`aarch64`) wheels are still published for every supported Python.
+  Intel macOS users should install from the published sdist or pin the
+  last release that shipped Intel wheels (`equiconc==0.4.1`).
+
 ## [0.4.1] - 2026-04-25
 
 ### Fixed

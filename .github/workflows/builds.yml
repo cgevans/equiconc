@@ -1,18 +1,15 @@
 name: Builds
 
-# Linux CI (lint, cargo-deny, web, docs, tests, tests-matrix) and
-# Codeberg Pages deploy live in .forgejo/workflows/builds.yml on
-# Codeberg. This workflow is the release pipeline: cross-platform
-# wheel builds, sdist, PyPI / GitHub Releases, and crates.io. Tag a
-# release only after the Codeberg CI is green — there's no in-tree
-# gate on that here yet.
+# Releases (PyPI, crates.io, Forgejo releases, Codeberg Generic Packages)
+# are now produced from Codeberg via .forgejo/workflows/builds.yml. This
+# workflow only validates pushes/PRs that happen on the GitHub mirror.
+# Do not re-add tag triggers or release jobs here without first
+# disabling the corresponding Codeberg jobs.
 
 on:
   push:
     branches:
       - main
-    tags:
-      - '*'
     paths-ignore:
       - CHANGELOG.md
       - README.md
@@ -22,276 +19,36 @@ on:
 permissions:
   contents: read
 
-# Cancel superseded runs on the same PR. Tag/main pushes have unique
-# refs and aren't affected.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  linux:
-    name: Python Linux builds
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-24.04
-    strategy:
-      matrix:
-        target: [x86_64]
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: 3.x
-      - name: Set up Rust cache
-        uses: Swatinem/rust-cache@v2
-      - name: Build wheels
-        uses: PyO3/maturin-action@v1
-        with:
-          target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
-          sccache: "true"
-          manylinux: auto
-      - name: Upload wheels
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheels-linux-${{ matrix.target }}
-          path: dist
-
-  linux-freethreaded:
-    name: Python Linux free-threaded builds
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-24.04
-    strategy:
-      matrix:
-        target: [x86_64]
-        python-version: ['3.13t', '3.14t']
-    steps:
-      - uses: actions/checkout@v6
-      - name: Compute container interpreter path
-        id: interp
-        run: |
-          VER="${{ matrix.python-version }}"
-          MM=$(echo "$VER" | tr -d '.t')
-          echo "path=/opt/python/cp${MM}-cp${MM}t/bin/python3" >> "$GITHUB_OUTPUT"
-      - name: Set up Rust cache
-        uses: Swatinem/rust-cache@v2
-      - name: Build wheels
-        uses: PyO3/maturin-action@v1
-        with:
-          target: ${{ matrix.target }}
-          args: --release --out dist --interpreter ${{ steps.interp.outputs.path }} --no-default-features --features python
-          sccache: "true"
-          manylinux: auto
-      - name: Upload wheels
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheels-linux-freethreaded-${{ matrix.python-version }}-${{ matrix.target }}
-          path: dist
-
-  windows:
-    name: Python Windows builds
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: windows-latest
-    strategy:
-      matrix:
-        target: [x64]
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: 3.x
-          architecture: ${{ matrix.target }}
-      - name: Set up Rust cache
-        uses: Swatinem/rust-cache@v2
-      - name: Build wheels
-        uses: PyO3/maturin-action@v1
-        with:
-          target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
-          sccache: "true"
-      - name: Upload wheels
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheels-windows-${{ matrix.target }}
-          path: dist
-
-  windows-freethreaded:
-    name: Python Windows free-threaded builds
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: windows-latest
-    strategy:
-      matrix:
-        target: [x64]
-        python-version: ['3.13t', '3.14t']
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: ${{ matrix.python-version }}
-          architecture: ${{ matrix.target }}
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-      - name: Set up Rust cache
-        uses: Swatinem/rust-cache@v2
-      - name: Build wheels
-        uses: PyO3/maturin-action@v1
-        with:
-          target: ${{ matrix.target }}
-          args: --release --out dist --interpreter python3 --no-default-features --features python
-          sccache: "true"
-          rust-toolchain: stable
-      - name: Upload wheels
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheels-windows-freethreaded-${{ matrix.python-version }}-${{ matrix.target }}
-          path: dist
-
-  macos:
-    name: Python MacOS builds
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      matrix:
-        include:
-          - runner: macos-15-intel
-            target: x86_64
-          - runner: macos-15
-            target: aarch64
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: 3.x
-      - name: Set up Rust cache
-        uses: Swatinem/rust-cache@v2
-      - name: Build wheels
-        uses: PyO3/maturin-action@v1
-        with:
-          target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
-          sccache: "true"
-      - name: Upload wheels
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheels-macos-${{ matrix.target }}
-          path: dist
-
-  macos-freethreaded:
-    name: Python MacOS free-threaded builds
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: macos-15
-    strategy:
-      matrix:
-        target: [x86_64, aarch64]
-        python-version: ['3.13t', '3.14t']
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: ${{ matrix.python-version }}
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-      - name: Set up Rust cache
-        uses: Swatinem/rust-cache@v2
-      - name: Build wheels
-        uses: PyO3/maturin-action@v1
-        with:
-          target: ${{ matrix.target }}
-          args: --release --out dist --interpreter python3 --no-default-features --features python
-          sccache: "true"
-          rust-toolchain: stable
-      - name: Upload wheels
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheels-macos-freethreaded-${{ matrix.python-version }}-${{ matrix.target }}
-          path: dist
-
-  sdist:
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v6
-      - name: Build sdist
-        uses: PyO3/maturin-action@v1
-        with:
-          command: sdist
-          args: --out dist
-      - name: Upload sdist
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheels-sdist
-          path: dist
-
-  release:
-    name: PyPI Release
+  rust_checks:
+    name: Rust checks (lint + tests)
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: [linux, linux-freethreaded, windows, windows-freethreaded, macos, macos-freethreaded, sdist]
-    permissions:
-      id-token: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          pattern: wheels-*
-          merge-multiple: true
-          path: dist
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-      - name: Publish to PyPI
-        run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/ dist/*
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+      - run: cargo clippy --workspace --no-default-features --all-targets -- -D warnings
+      - run: cargo test --lib
 
-  github_release:
-    name: GitHub Release
+  python_checks:
+    name: Python checks (maturin develop + pytest)
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: [linux, linux-freethreaded, windows, windows-freethreaded, macos, macos-freethreaded, sdist]
-    permissions:
-      contents: write
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v7
         with:
-          pattern: wheels-*
-          merge-multiple: true
-          path: dist
-      - name: Extract changelog for this version
-        id: changelog
-        run: |
-          TAG="${GITHUB_REF_NAME}"
-          VERSION="${TAG#v}"
-          NOTES=$(awk -v ver="$VERSION" '
-            BEGIN { found=0 }
-            /^## \[/ {
-              if (found) exit
-              header=$0; sub(/^## \[/, "", header); sub(/\].*/, "", header)
-              if (header == ver) found=1
-              next
-            }
-            found { print }
-          ' CHANGELOG.md)
-          echo "$NOTES" > /tmp/release-notes.md
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
-            --notes-file /tmp/release-notes.md \
-            dist/*
-
-  rust_release:
-    name: Rust Crates.io Release
-    runs-on: ubuntu-24.04
-    if: startsWith(github.ref, 'refs/tags/')
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-      - name: Set up Rust cache
-        uses: Swatinem/rust-cache@v2
-      - name: Publish to crates.io
-        run: cargo publish -p equiconc
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+          enable-cache: true
+          python-version: "3.12"
+      - run: uv sync --dev --no-install-project
+      - run: uv run maturin develop --uv --release
+      - run: uv run pytest tests/test_equiconc.py -v

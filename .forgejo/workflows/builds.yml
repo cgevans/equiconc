@@ -1,10 +1,54 @@
 name: Builds
 
-# Linux CI on Codeberg Forgejo Actions. The GitHub workflow still
-# owns the release pipeline (wheel builds for all platforms, sdist,
-# PyPI / GitHub Releases, crates.io); this side runs the Linux-only
-# lint / test / build checks on every push and PR, and deploys docs
-# + the web app to Codeberg Pages on main / tag pushes.
+# Codeberg Forgejo Actions: full CI + release pipeline.
+#
+# This workflow now owns the release path (PyPI, crates.io, and a
+# Forgejo release with all wheels attached). The GitHub workflow at
+# .github/workflows/builds.yml is reduced to a CI mirror; do not re-add
+# tag triggers there without first disabling the corresponding Codeberg
+# jobs.
+#
+# Note: the Codeberg Generic Packages registry is intentionally NOT used
+# as a release mirror. Wheel artifacts are uploaded to the Forgejo
+# release page only, and CI artifact retention is kept short, to stay
+# under Codeberg's 1.5 GB per-repo storage quota.
+#
+# Runner expectations (adjust `runs-on:` labels if your runners use
+# different ones):
+#   - `docker`      : Linux runner that executes jobs inside a container.
+#                     Wheel-build jobs use a manylinux container directly
+#                     to avoid docker-in-docker for the maturin step.
+#                     The manylinux image has no `node`, so a first step
+#                     installs Node 20 from NodeSource (Forgejo Actions
+#                     invokes JS actions like actions/checkout via node).
+#   - `windows`     : Windows host runner (no container). The host PATH
+#                     must include `git.exe` and `node.exe`.
+#   - `macos-arm64` : Apple Silicon macOS host runner for Python wheel
+#                     builds. macOS x86_64 wheels are intentionally
+#                     deprecated; Intel users should install from sdist.
+#
+# Secrets (set in Codeberg → repo → Settings → Actions → Secrets):
+#   - PYPI_TOKEN      : required for `python_release` (PyPI does not
+#                       accept Codeberg OIDC, so we use a token).
+#   - CRATES_IO_TOKEN : required for `rust_release`.
+#   - CODECOV_TOKEN   : optional; coverage upload is best-effort and is
+#                       currently unwired (see comment in `tests`).
+#   - forge.token     : auto-provided by Forgejo (used by
+#                       `forgejo-release@v2` and `git-pages/action@v2`).
+#
+# Caching: wheel-build jobs that run inside the docker runner use named
+# host volumes (`equiconc-cargo`, `equiconc-cargo-target`, `equiconc-uv`)
+# for cargo registry/index/target persistence. The runner's config.yaml
+# must permit these mounts, e.g.:
+#
+#   container:
+#     valid_volumes:
+#       - "equiconc-*"
+#
+# (or `["**"]` to allow any). Existing CI jobs (lint, cargo-deny, web,
+# docs, tests, tests-matrix) keep their previous caching strategy
+# (Swatinem/rust-cache, setup-uv enable-cache); the volume pattern is
+# only required for the new wheel-build jobs.
 
 on:
   push:
@@ -17,6 +61,15 @@ on:
       - README.md
   pull_request:
   workflow_dispatch:
+    inputs:
+      build_wheels:
+        description: "Build Python wheels and sdist without publishing"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 permissions:
   contents: read
@@ -80,11 +133,11 @@ jobs:
         working-directory: web
         run: trunk build --release
       - name: Upload dist artifact
-        uses: https://github.com/actions/upload-artifact@v3
+        uses: https://code.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: web-dist
           path: web/dist/
-          retention-days: 7
+          retention-days: 3
 
   docs:
     name: Docs (zensical build with executed notebooks)
@@ -121,11 +174,11 @@ jobs:
       - run: uv sync --group docs
       - run: just docs
       - name: Upload docs artifact
-        uses: https://github.com/actions/upload-artifact@v3
+        uses: https://code.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: docs-site
           path: site/
-          retention-days: 7
+          retention-days: 3
 
   tests:
     runs-on: docker
@@ -178,7 +231,7 @@ jobs:
   # matrix corners that ship in the PyPI wheel but are never otherwise
   # exercised: the minimum supported Python (3.10) and the free-threaded
   # interpreter (3.13t). macOS / Windows are validated only at release
-  # time via the wheel-build jobs in the GitHub workflow.
+  # time via the wheel-build jobs below.
   tests-matrix:
     name: Tests (${{ matrix.label }})
     runs-on: docker
@@ -230,6 +283,391 @@ jobs:
       - name: pytest
         run: uv run pytest tests/test_equiconc.py -v
 
+  # ----- Wheel and sdist builds -------------------------------------
+  # Gated on tag pushes or manual `workflow_dispatch` with
+  # `build_wheels=true`. Branch pushes and PRs do not build wheels.
+
+  linux:
+    name: Python Linux builds
+    if: startsWith(forge.ref, 'refs/tags/') || inputs.build_wheels == 'true'
+    needs: [tests, tests-matrix, lint]
+    runs-on: docker
+    container:
+      image: quay.io/pypa/manylinux_2_28_x86_64
+      volumes:
+        - equiconc-cargo:/cache/cargo
+        - equiconc-cargo-target:/cache/cargo-target
+    env:
+      CARGO_HOME: /cache/cargo
+      CARGO_TARGET_DIR: /cache/cargo-target
+    strategy:
+      matrix:
+        target: [x86_64]
+    steps:
+      - name: Install Node.js (manylinux image has no node, but JS actions need it)
+        run: |
+          curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
+          dnf install -y nodejs
+      - uses: https://github.com/actions/checkout@v6
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+      - name: Build wheels
+        run: |
+          PYTHONS="/opt/python/cp310-cp310/bin/python3 \
+                   /opt/python/cp311-cp311/bin/python3 \
+                   /opt/python/cp312-cp312/bin/python3 \
+                   /opt/python/cp313-cp313/bin/python3 \
+                   /opt/python/cp314-cp314/bin/python3"
+          /opt/python/cp312-cp312/bin/pip install maturin
+          /opt/python/cp312-cp312/bin/maturin build --release --out dist \
+            --manylinux 2_28 --target ${{ matrix.target }}-unknown-linux-gnu \
+            -i $PYTHONS
+      - uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist
+          retention-days: 1
+
+  linux-freethreaded:
+    name: Python Linux free-threaded builds
+    if: startsWith(forge.ref, 'refs/tags/') || inputs.build_wheels == 'true'
+    needs: [tests, tests-matrix, lint]
+    runs-on: docker
+    container:
+      image: quay.io/pypa/manylinux_2_28_x86_64
+      volumes:
+        - equiconc-cargo:/cache/cargo
+        - equiconc-cargo-target:/cache/cargo-target
+    env:
+      CARGO_HOME: /cache/cargo
+      CARGO_TARGET_DIR: /cache/cargo-target
+    strategy:
+      matrix:
+        target: [x86_64]
+        python-version: ['3.13t', '3.14t']
+    steps:
+      - name: Install Node.js (manylinux image has no node, but JS actions need it)
+        run: |
+          curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
+          dnf install -y nodejs
+      - uses: https://github.com/actions/checkout@v6
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+      - name: Compute interpreter path
+        id: interp
+        run: |
+          VER="${{ matrix.python-version }}"
+          MM=$(echo "$VER" | tr -d '.t')
+          echo "path=/opt/python/cp${MM}-cp${MM}t/bin/python3" >> "$GITHUB_OUTPUT"
+      - name: Build wheels
+        # abi3-py310 doesn't apply on free-threaded; opt out of crate
+        # default features and turn `python` on explicitly. Matches the
+        # tests-matrix `linux-py3.13t` row and the previous GitHub
+        # free-threaded job.
+        run: |
+          /opt/python/cp312-cp312/bin/pip install maturin
+          /opt/python/cp312-cp312/bin/maturin build --release --out dist \
+            --interpreter ${{ steps.interp.outputs.path }} \
+            --manylinux 2_28 --target ${{ matrix.target }}-unknown-linux-gnu \
+            --no-default-features --features python
+      - uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: wheels-linux-freethreaded-${{ matrix.python-version }}-${{ matrix.target }}
+          path: dist
+          retention-days: 1
+
+  windows:
+    name: Python Windows builds
+    if: startsWith(forge.ref, 'refs/tags/') || inputs.build_wheels == 'true'
+    needs: [tests, tests-matrix, lint]
+    runs-on: windows
+    env:
+      UV_CACHE_DIR: .uv-cache
+      UV_MANAGED_PYTHON: "1"
+    strategy:
+      matrix:
+        target: [x64]
+    steps:
+      - uses: https://github.com/actions/checkout@v6
+      - name: Configure persistent cargo cache
+        # Windows runs natively on the host (no container, so the
+        # equiconc-cargo volumes used by the Linux jobs don't apply).
+        # Point CARGO_HOME / CARGO_TARGET_DIR at a path under the
+        # runner user's profile so the cargo registry index, downloaded
+        # crates, and incremental build artifacts persist across jobs.
+        shell: pwsh
+        run: |
+          $cacheRoot = Join-Path $env:USERPROFILE ".equiconc-cache"
+          $cargoHome = Join-Path $cacheRoot "cargo"
+          $targetDir = Join-Path $cacheRoot "cargo-target"
+          New-Item -ItemType Directory -Force -Path $cargoHome | Out-Null
+          New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+          "CARGO_HOME=$cargoHome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CARGO_TARGET_DIR=$targetDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Install Rust
+        shell: pwsh
+        run: |
+          $rustup = Join-Path ([System.IO.Path]::GetTempPath()) "rustup-init.exe"
+          Invoke-WebRequest -Uri "https://win.rustup.rs/x86_64" -OutFile $rustup
+          & $rustup --default-toolchain stable --profile minimal --no-modify-path -y
+          "$env:CARGO_HOME\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+      - name: Install uv
+        uses: https://github.com/astral-sh/setup-uv@v7
+      - name: Install Python interpreters
+        shell: pwsh
+        run: uv python install 3.10 3.11 3.12 3.13 3.14
+      - name: Build wheels
+        shell: pwsh
+        run: |
+          $pythons = @("3.10", "3.11", "3.12", "3.13", "3.14") | ForEach-Object { uv python find $_ }
+          uvx maturin build --release --out dist --interpreter $pythons
+      - uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: wheels-windows-${{ matrix.target }}
+          path: dist
+          retention-days: 1
+
+  windows-freethreaded:
+    name: Python Windows free-threaded builds
+    if: startsWith(forge.ref, 'refs/tags/') || inputs.build_wheels == 'true'
+    needs: [tests, tests-matrix, lint]
+    runs-on: windows
+    env:
+      UV_CACHE_DIR: .uv-cache
+      UV_MANAGED_PYTHON: "1"
+    strategy:
+      matrix:
+        target: [x64]
+        python-version: ['3.13t', '3.14t']
+    steps:
+      - uses: https://github.com/actions/checkout@v6
+      - name: Configure persistent cargo cache
+        shell: pwsh
+        run: |
+          $cacheRoot = Join-Path $env:USERPROFILE ".equiconc-cache"
+          $cargoHome = Join-Path $cacheRoot "cargo"
+          $targetDir = Join-Path $cacheRoot "cargo-target"
+          New-Item -ItemType Directory -Force -Path $cargoHome | Out-Null
+          New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+          "CARGO_HOME=$cargoHome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CARGO_TARGET_DIR=$targetDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Install Rust
+        shell: pwsh
+        run: |
+          $rustup = Join-Path ([System.IO.Path]::GetTempPath()) "rustup-init.exe"
+          Invoke-WebRequest -Uri "https://win.rustup.rs/x86_64" -OutFile $rustup
+          & $rustup --default-toolchain stable --profile minimal --no-modify-path -y
+          "$env:CARGO_HOME\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+      - name: Install uv
+        uses: https://github.com/astral-sh/setup-uv@v7
+      - name: Install Python interpreter
+        shell: pwsh
+        run: uv python install ${{ matrix.python-version }}
+      - name: Build wheels
+        # Same `--no-default-features --features python` rationale as
+        # the linux-freethreaded job.
+        shell: pwsh
+        run: |
+          $python = uv python find ${{ matrix.python-version }}
+          uvx maturin build --release --out dist --interpreter $python --no-default-features --features python
+      - uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: wheels-windows-freethreaded-${{ matrix.python-version }}-${{ matrix.target }}
+          path: dist
+          retention-days: 1
+
+  # macOS jobs run on the `macos-arm64` self-hosted runner. macOS
+  # x86_64 wheels are intentionally deprecated; Intel users install
+  # from sdist.
+  macos:
+    name: Python macOS builds
+    if: startsWith(forge.ref, 'refs/tags/') || inputs.build_wheels == 'true'
+    needs: [tests, tests-matrix, lint]
+    runs-on: macos-arm64
+    env:
+      UV_CACHE_DIR: .uv-cache
+      UV_MANAGED_PYTHON: "1"
+    strategy:
+      matrix:
+        target: [aarch64]
+    steps:
+      - uses: https://github.com/actions/checkout@v6
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Install uv
+        uses: https://github.com/astral-sh/setup-uv@v7
+      - name: Install Python interpreters
+        run: uv python install 3.10 3.11 3.12 3.13 3.14
+      - name: Build wheels
+        run: |
+          pythons=$(for v in 3.10 3.11 3.12 3.13 3.14; do uv python find "$v"; done)
+          uvx maturin build --release --out dist --target ${{ matrix.target }}-apple-darwin --interpreter $pythons
+      - uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist
+          retention-days: 1
+
+  macos-freethreaded:
+    name: Python macOS free-threaded builds
+    if: startsWith(forge.ref, 'refs/tags/') || inputs.build_wheels == 'true'
+    needs: [tests, tests-matrix, lint]
+    runs-on: macos-arm64
+    env:
+      UV_CACHE_DIR: .uv-cache
+      UV_MANAGED_PYTHON: "1"
+    strategy:
+      matrix:
+        target: [aarch64]
+        python-version: ['3.13t', '3.14t']
+    steps:
+      - uses: https://github.com/actions/checkout@v6
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Install uv
+        uses: https://github.com/astral-sh/setup-uv@v7
+      - name: Install Python interpreter
+        run: uv python install ${{ matrix.python-version }}
+      - name: Build wheels
+        # Same `--no-default-features --features python` rationale as
+        # the linux-freethreaded job.
+        run: |
+          python=$(uv python find ${{ matrix.python-version }})
+          uvx maturin build --release --out dist --target ${{ matrix.target }}-apple-darwin --interpreter "$python" --no-default-features --features python
+      - uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: wheels-macos-freethreaded-${{ matrix.python-version }}-${{ matrix.target }}
+          path: dist
+          retention-days: 1
+
+  sdist:
+    name: Build sdist
+    if: startsWith(forge.ref, 'refs/tags/') || inputs.build_wheels == 'true'
+    needs: [tests, tests-matrix, lint]
+    runs-on: docker
+    container:
+      image: code.forgejo.org/oci/node:22-bookworm
+      volumes:
+        - equiconc-cargo:/cache/cargo
+        - equiconc-cargo-target:/cache/cargo-target
+    env:
+      CARGO_HOME: /cache/cargo
+      CARGO_TARGET_DIR: /cache/cargo-target
+    steps:
+      - uses: https://github.com/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - uses: https://github.com/astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+      - name: Build sdist
+        run: uvx maturin sdist --out dist
+      - uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: dist
+          retention-days: 1
+
+  # ----- Release publication (tag-only) -----------------------------
+
+  python_release:
+    name: Python PyPI release
+    runs-on: docker
+    container:
+      image: code.forgejo.org/oci/node:22-bookworm
+    if: startsWith(forge.ref, 'refs/tags/')
+    needs: [linux, linux-freethreaded, windows, windows-freethreaded, macos, macos-freethreaded, sdist]
+    steps:
+      - uses: https://code.forgejo.org/forgejo/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - name: Install uv
+        uses: https://github.com/astral-sh/setup-uv@v7
+      - name: Publish to PyPI
+        # PyPI trusted publishing currently doesn't support
+        # Codeberg/Forgejo OIDC, so we use an API token. Set PYPI_TOKEN
+        # as a repo secret.
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        run: uv publish --check-url https://pypi.org/simple/ dist/*
+
+  rust_release:
+    name: Rust crates.io release
+    runs-on: docker
+    container:
+      image: code.forgejo.org/oci/node:22-bookworm
+      volumes:
+        - equiconc-cargo:/cache/cargo
+        - equiconc-cargo-target:/cache/cargo-target
+    env:
+      CARGO_HOME: /cache/cargo
+      CARGO_TARGET_DIR: /cache/cargo-target
+    if: startsWith(forge.ref, 'refs/tags/')
+    needs: [lint, tests]
+    steps:
+      - uses: https://github.com/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: cargo publish -p equiconc
+
+  forgejo_release:
+    name: Forgejo release
+    runs-on: docker
+    container:
+      image: code.forgejo.org/oci/node:22-bookworm
+    if: startsWith(forge.ref, 'refs/tags/')
+    needs: [linux, linux-freethreaded, windows, windows-freethreaded, macos, macos-freethreaded, sdist]
+    permissions:
+      contents: write
+    steps:
+      - uses: https://github.com/actions/checkout@v6
+      - uses: https://code.forgejo.org/forgejo/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - name: Extract changelog for this version
+        # Keep-a-Changelog style: `## [VERSION] - DATE` headers. Reuse
+        # the awk extractor previously used by the GitHub release job.
+        run: |
+          TAG="${{ forge.ref_name }}"
+          VERSION="${TAG#v}"
+          NOTES=$(awk -v ver="$VERSION" '
+            BEGIN { found=0 }
+            /^## \[/ {
+              if (found) exit
+              header=$0; sub(/^## \[/, "", header); sub(/\].*/, "", header)
+              if (header == ver) found=1
+              next
+            }
+            found { print }
+          ' CHANGELOG.md)
+          echo "$NOTES" > /tmp/release-notes.md
+      - name: Create Forgejo release
+        uses: https://code.forgejo.org/actions/forgejo-release@v2
+        with:
+          direction: upload
+          url: ${{ forge.server_url }}
+          repo: ${{ forge.repository }}
+          tag: ${{ forge.ref_name }}
+          title: ${{ forge.ref_name }}
+          release-notes-file: /tmp/release-notes.md
+          release-dir: dist
+          token: ${{ forge.token }}
+
+  # ----- Codeberg Pages deploy --------------------------------------
+
   pages:
     name: Deploy docs (root) + web app (/app/) to Codeberg Pages
     # Auto-deploys on main and tag pushes. workflow_dispatch (any
@@ -245,35 +683,20 @@ jobs:
     runs-on: docker
     container:
       image: code.forgejo.org/oci/node:22-bookworm
-    permissions:
-      contents: write
     steps:
       - name: Download docs site
-        uses: https://github.com/actions/download-artifact@v3
+        uses: https://code.forgejo.org/forgejo/download-artifact@v4
         with:
           name: docs-site
-          path: dist
+          path: site
       - name: Download web app dist
-        uses: https://github.com/actions/download-artifact@v3
+        uses: https://code.forgejo.org/forgejo/download-artifact@v4
         with:
           name: web-dist
-          path: dist/app
-      # Codeberg Pages serves whatever sits on the `pages` branch of
-      # the repo at https://<user>.codeberg.page/<repo>/. We commit
-      # the combined dist tree there as a single orphan commit so the
-      # branch never accumulates history. Auth uses the auto-provided
-      # workflow token (writable because of the job-level `contents:
-      # write` permission above).
-      - name: Push dist to pages branch
-        env:
-          TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -eu
-          cd dist
-          git init -q -b pages
-          git config user.email "ci@codeberg.org"
-          git config user.name "Codeberg CI"
-          git add -A
-          git commit -q -m "Deploy ${GITHUB_SHA} from ${GITHUB_REF}"
-          server="${GITHUB_SERVER_URL#https://}"
-          git push -f "https://x-access-token:${TOKEN}@${server}/${GITHUB_REPOSITORY}.git" pages
+          path: site/app
+      - name: Deploy to Codeberg Pages
+        uses: https://codeberg.org/git-pages/action@v2
+        with:
+          site: "https://${{ forge.repository_owner }}.codeberg.page/equiconc/"
+          token: ${{ forge.token }}
+          source: site/
