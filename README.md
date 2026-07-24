@@ -1,4 +1,4 @@
-[![Documentation](https://img.shields.io/badge/docs-cge.codeberg.page%2Fequiconc-blue)](https://cge.codeberg.page/equiconc/)
+[![Documentation](https://img.shields.io/badge/docs-docs.costi.net%2Fequiconc-blue)](https://docs.costi.net/equiconc/)
 
 Equiconc is an equilibrium concentration solver for monomer/complex systems (like networks of interactions of DNA/RNA strands),
 _when the complexes are already enumerated and standard free energies of binding are known_.  It implements the convex optimization
@@ -7,7 +7,7 @@ applied generally, for example, to find equilibrium concentrations in tile assem
 
 The library is written in Rust, with a Python interface that is intended to be easily usable.
 
-There is also an [in-browser web interface](https://cge.codeberg.page/equiconc/app/), which runs the solver in your browser directly (not a server).  This interface was inspired by [COFFEE](https://coffeesolver.dev/); Equiconc also supports a modified version of their log-based optimization ([Yu et al, 2025](https://doi.org/10.1109/SIEDS65500.2025.11021092)).
+There is also an [in-browser web interface](https://docs.costi.net/equiconc/app/), which runs the solver in your browser directly (not a server).  This interface was inspired by [COFFEE](https://coffeesolver.dev/); Equiconc also supports a modified version of their log-based optimization ([Yu et al, 2025](https://doi.org/10.1109/SIEDS65500.2025.11021092)).
 
 ## Quick example
 

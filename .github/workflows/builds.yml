@@ -1,54 +1,519 @@
 name: Builds
 
-# Releases (PyPI, crates.io, Forgejo releases, Codeberg Generic Packages)
-# are now produced from Codeberg via .forgejo/workflows/builds.yml. This
-# workflow only validates pushes/PRs that happen on the GitHub mirror.
-# Do not re-add tag triggers or release jobs here without first
-# disabling the corresponding Codeberg jobs.
+# GitHub Actions: full CI + release pipeline. This workflow owns
+# publication (PyPI, crates.io, GitHub releases). The counterpart at
+# .forgejo/workflows/builds.yml runs the same checks on git.costi.net's
+# self-hosted runners and deploys the documentation; it does not publish.
+#
+# Secrets:
+#   - CRATES_IO_TOKEN : required for `rust_release`.
+#   - CODECOV_TOKEN   : optional, coverage upload is best-effort.
+#   PyPI publication uses trusted publishing (OIDC), so no token is
+#   needed; the publisher on PyPI is bound to this workflow filename.
 
 on:
   push:
     branches:
       - main
+    tags:
+      - '*'
     paths-ignore:
       - CHANGELOG.md
       - README.md
   pull_request:
   workflow_dispatch:
+    inputs:
+      build_wheels:
+        description: "Build Python wheels and sdist without publishing"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 permissions:
   contents: read
 
+# Cancel superseded runs on the same PR. Tag/main pushes have unique
+# refs and aren't affected.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  rust_checks:
-    name: Rust checks (lint + tests)
+  lint:
+    name: Lint (fmt + clippy + rustdoc)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-features --all-targets -- -D warnings
-      - run: cargo clippy --workspace --no-default-features --all-targets -- -D warnings
-      - run: cargo test --lib
+      - name: cargo clippy --no-default-features (scalar path stays alive)
+        run: cargo clippy --workspace --no-default-features --all-targets -- -D warnings
+      - name: cargo doc (deny warnings)
+        run: cargo doc --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: "-D warnings"
 
-  python_checks:
-    name: Python checks (maturin develop + pytest)
+  cargo-deny:
+    name: cargo-deny (licenses, advisories, sources)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses advisories sources
+
+  web:
+    name: Web (wasm build + native tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install trunk
+        uses: jetli/trunk-action@v0.5.0
+        with:
+          version: latest
+      - name: cargo test (web crate, native)
+        run: cargo test -p equiconc-web
+      - name: trunk build --release
+        working-directory: web
+        run: trunk build --release
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist/
+          retention-days: 7
+
+  docs:
+    name: Docs (zensical build with executed notebooks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v7
+      - uses: extractions/setup-just@v4
+      - run: uv sync --group docs
+      - run: just docs
+      - name: Upload docs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-site
+          path: site/
+          retention-days: 7
+
+  pages:
+    name: Deploy docs (root) + web app (/app/) to GitHub Pages
+    # docs.costi.net is the documentation URL from 0.5.0 onward, and is
+    # deployed from .forgejo/workflows/builds.yml. This job stays because
+    # equiconc 0.4.1 is already on PyPI with its Documentation URL set to
+    # cgevans.github.io/equiconc; dropping it would break that link for
+    # anyone on the current release.
+    #
+    # Auto-deploys on main and tag pushes. workflow_dispatch (any
+    # branch) is allowed as an escape hatch so the Pages plumbing can
+    # be smoke-tested from a feature branch without cutting a release;
+    # whatever ref was dispatched then becomes the live site until the
+    # next main/tag push overwrites it.
+    if: |
+      github.event_name == 'workflow_dispatch'
+      || github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/tags/')
+    needs: [web, docs, lint]
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Download docs site
+        uses: actions/download-artifact@v8
+        with:
+          name: docs-site
+          path: dist
+      - name: Download web app dist
+        uses: actions/download-artifact@v8
+        with:
+          name: web-dist
+          path: dist/app
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: dist
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov
+      - uses: extractions/setup-just@v4
+
+      - run: uv sync --dev --no-install-project # special version will be installed by coverage-lcov
+      - run: just coverage-python-full
+      - run: just coverage-rust
+      - uses: coverallsapp/github-action@v2
+        with:
+          files: coverage-rust-from-python.lcov coverage-python.xml coverage-rust.lcov
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Lightweight cross-Python smoke tests. The `tests` job above is the
+  # source of truth (with coverage) on Linux+3.12; this job covers the
+  # matrix corners that ship in the PyPI wheel but are never otherwise
+  # exercised: the minimum supported Python (3.10) and the free-threaded
+  # interpreter (3.13t). macOS / Windows are validated only at release
+  # time via the wheel-build jobs below.
+  tests-matrix:
+    name: Tests (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-py3.10
+            os: ubuntu-latest
+            python-version: "3.10"
+            maturin-extra: ""
+            cargo-test-extra: ""
+          - label: linux-py3.13t
+            os: ubuntu-latest
+            python-version: "3.13t"
+            # abi3-py310 doesn't apply on free-threaded; opt out of the
+            # crate default features and turn on `python` explicitly,
+            # matching the free-threaded wheel build below.
+            maturin-extra: "--no-default-features --features python"
+            cargo-test-extra: ""
+          - label: linux-py3.12-simd
+            os: ubuntu-latest
+            python-version: "3.12"
+            # Smoke test the opt-in `simd` feature end-to-end so a
+            # regression in the SIMD path is caught here rather than at
+            # release. (lint already runs `cargo clippy --all-features`,
+            # but that's compile-only.)
+            #
+            # `python` has to come along explicitly: the crate's default
+            # features are empty (the SIMD-opt-in flip set them to `[]`),
+            # so without it maturin sees no PyO3 bindings and falls back
+            # to cffi, which then fails because the uv venv has no pip.
+            maturin-extra: "--features simd,python"
+            cargo-test-extra: "--features simd"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
       - uses: Swatinem/rust-cache@v2
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
-          python-version: "3.12"
+      - name: cargo test (lib)
+        run: cargo test --lib ${{ matrix.cargo-test-extra }}
       - run: uv sync --dev --no-install-project
-      - run: uv run maturin develop --uv --release
-      - run: uv run pytest tests/test_equiconc.py -v
+      - name: Build extension
+        run: uv run maturin develop --uv --release ${{ matrix.maturin-extra }}
+      - name: pytest
+        run: uv run pytest tests/test_equiconc.py -v
+
+  linux:
+    name: Python Linux builds
+    if: startsWith(github.ref, 'refs/tags/') || inputs.build_wheels == 'true'
+    needs: [lint, cargo-deny, tests, tests-matrix]
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        target: [x86_64]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: 3.x
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --find-interpreter
+          sccache: "true"
+          manylinux: auto
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist
+
+  linux-freethreaded:
+    name: Python Linux free-threaded builds
+    if: startsWith(github.ref, 'refs/tags/') || inputs.build_wheels == 'true'
+    needs: [lint, cargo-deny, tests, tests-matrix]
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        target: [x86_64]
+        python-version: ['3.13t', '3.14t']
+    steps:
+      - uses: actions/checkout@v6
+      - name: Compute container interpreter path
+        id: interp
+        run: |
+          VER="${{ matrix.python-version }}"
+          MM=$(echo "$VER" | tr -d '.t')
+          echo "path=/opt/python/cp${MM}-cp${MM}t/bin/python3" >> "$GITHUB_OUTPUT"
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --interpreter ${{ steps.interp.outputs.path }} --no-default-features --features python
+          sccache: "true"
+          manylinux: auto
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-freethreaded-${{ matrix.python-version }}-${{ matrix.target }}
+          path: dist
+
+  windows:
+    name: Python Windows builds
+    if: startsWith(github.ref, 'refs/tags/') || inputs.build_wheels == 'true'
+    needs: [lint, cargo-deny, tests, tests-matrix]
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        target: [x64]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: 3.x
+          architecture: ${{ matrix.target }}
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --find-interpreter
+          sccache: "true"
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-${{ matrix.target }}
+          path: dist
+
+  windows-freethreaded:
+    name: Python Windows free-threaded builds
+    if: startsWith(github.ref, 'refs/tags/') || inputs.build_wheels == 'true'
+    needs: [lint, cargo-deny, tests, tests-matrix]
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        target: [x64]
+        python-version: ['3.13t', '3.14t']
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          architecture: ${{ matrix.target }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --interpreter python3 --no-default-features --features python
+          sccache: "true"
+          rust-toolchain: stable
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-freethreaded-${{ matrix.python-version }}-${{ matrix.target }}
+          path: dist
+
+  macos:
+    name: Python MacOS builds
+    if: startsWith(github.ref, 'refs/tags/') || inputs.build_wheels == 'true'
+    needs: [lint, cargo-deny, tests, tests-matrix]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - runner: macos-15-intel
+            target: x86_64
+          - runner: macos-15
+            target: aarch64
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: 3.x
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --find-interpreter
+          sccache: "true"
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist
+
+  macos-freethreaded:
+    name: Python MacOS free-threaded builds
+    if: startsWith(github.ref, 'refs/tags/') || inputs.build_wheels == 'true'
+    needs: [lint, cargo-deny, tests, tests-matrix]
+    runs-on: macos-15
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+        python-version: ['3.13t', '3.14t']
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --interpreter python3 --no-default-features --features python
+          sccache: "true"
+          rust-toolchain: stable
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-freethreaded-${{ matrix.python-version }}-${{ matrix.target }}
+          path: dist
+
+  sdist:
+    if: startsWith(github.ref, 'refs/tags/') || inputs.build_wheels == 'true'
+    needs: [lint, cargo-deny, tests, tests-matrix]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: dist
+
+  release:
+    name: PyPI Release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [linux, linux-freethreaded, windows, windows-freethreaded, macos, macos-freethreaded, sdist]
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Publish to PyPI
+        run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/ dist/*
+
+  github_release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [linux, linux-freethreaded, windows, windows-freethreaded, macos, macos-freethreaded, sdist]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          NOTES=$(awk -v ver="$VERSION" '
+            BEGIN { found=0 }
+            /^## \[/ {
+              if (found) exit
+              header=$0; sub(/^## \[/, "", header); sub(/\].*/, "", header)
+              if (header == ver) found=1
+              next
+            }
+            found { print }
+          ' CHANGELOG.md)
+          echo "$NOTES" > /tmp/release-notes.md
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file /tmp/release-notes.md \
+            dist/*
+
+  rust_release:
+    name: Rust Crates.io Release
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [lint, cargo-deny, tests, tests-matrix]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
+      - name: Publish to crates.io
+        run: cargo publish -p equiconc
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}

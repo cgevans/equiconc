@@ -26,9 +26,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://codeberg.org/cge/equiconc"
-Repository = "https://codeberg.org/cge/equiconc"
-Documentation = "https://cge.codeberg.page/equiconc/"
+Homepage = "https://github.com/cgevans/equiconc"
+Repository = "https://github.com/cgevans/equiconc"
+Documentation = "https://docs.costi.net/equiconc/"
 
 [tool.maturin]
 features = ["python"]
