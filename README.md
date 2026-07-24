@@ -27,3 +27,7 @@ print(f"Free [A] = {eq['A']:.2e} M")
 print(f"Free [B] = {eq['B']:.2e} M")
 print(f"[AB]     = {eq['AB']:.2e} M")
 ```
+
+## Note regarding Codeberg 
+
+I am aware that Codeberg is banning majority-LLM projects; while I do fully understand how this code works, and have reviewed the code, the direct code was LLM-generated, and makes no attempt to hide that fact.  I am also now aware that "side projects and experiments" are not welcome on Codeberg, and that it might not be the right place for academic code projects.  I am in the process of moving my projects off of Codeberg, but ask for some patience and understanding while I do so.
